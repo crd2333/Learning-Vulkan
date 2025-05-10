@@ -16,7 +16,13 @@
 const uint32_t WIDTH = 800;
 const uint32_t HEIGHT = 600;
 
-const int MAX_FRAMES_IN_FLIGHT = 2;
+// 在上一讲中，我们利用 vkQueueWaitIdle(presentQueue); 等待前一帧完成才能开始渲染下一帧，这保证了程序的正确性和稳定性，但是是对计算资源的浪费
+// 这一讲中，我们允许多个帧 in-flight，也就是说，允许渲染一帧不干扰下一帧的录制
+// 具体而言，任何在渲染期间被访问和修改的资源都必须被复制（需要多个 CommandBuffer, Semaphore, Fence）
+// 在后面的章节中，还将添加其他资源的多个实例，因此将看到这个概念再次出现 (in flight)
+
+// 在程序顶部添加一个常量，用于定义应同时处理多少帧
+const int MAX_FRAMES_IN_FLIGHT = 2; // 2 这个数字比较讲究，CPU 可以超前但不超前太多（帧延迟）
 
 const std::vector<const char*> validationLayers = {
     "VK_LAYER_KHRONOS_validation"
@@ -33,16 +39,17 @@ const bool enableValidationLayers = true;
 #endif
 
 VkResult CreateDebugUtilsMessengerEXT(VkInstance instance, const VkDebugUtilsMessengerCreateInfoEXT* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkDebugUtilsMessengerEXT* pDebugMessenger) {
-    auto func = (PFN_vkCreateDebugUtilsMessengerEXT) vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT");
+    auto func = (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT");
     if (func != nullptr) {
         return func(instance, pCreateInfo, pAllocator, pDebugMessenger);
-    } else {
+    }
+    else {
         return VK_ERROR_EXTENSION_NOT_PRESENT;
     }
 }
 
 void DestroyDebugUtilsMessengerEXT(VkInstance instance, VkDebugUtilsMessengerEXT debugMessenger, const VkAllocationCallbacks* pAllocator) {
-    auto func = (PFN_vkDestroyDebugUtilsMessengerEXT) vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT");
+    auto func = (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT");
     if (func != nullptr) {
         func(instance, debugMessenger, pAllocator);
     }
@@ -97,12 +104,13 @@ private:
     VkPipeline graphicsPipeline;
 
     VkCommandPool commandPool;
-    std::vector<VkCommandBuffer> commandBuffers;
+    std::vector<VkCommandBuffer> commandBuffers; // 把之前的 commandBuffer 改成 commandBuffers，用 vector 包裹
 
+    // 把之前的 semaphore, fence 改成 vector
     std::vector<VkSemaphore> imageAvailableSemaphores;
     std::vector<VkSemaphore> renderFinishedSemaphores;
     std::vector<VkFence> inFlightFences;
-    uint32_t currentFrame = 0;
+    uint32_t currentFrame = 0; // 跟踪当前帧，使用帧索引
 
     void initWindow() {
         glfwInit();
@@ -139,7 +147,7 @@ private:
     }
 
     void cleanup() {
-        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) { // 释放每个帧的 semaphore 和 fence
             vkDestroySemaphore(device, renderFinishedSemaphores[i], nullptr);
             vkDestroySemaphore(device, imageAvailableSemaphores[i], nullptr);
             vkDestroyFence(device, inFlightFences[i], nullptr);
@@ -201,8 +209,9 @@ private:
             createInfo.ppEnabledLayerNames = validationLayers.data();
 
             populateDebugMessengerCreateInfo(debugCreateInfo);
-            createInfo.pNext = (VkDebugUtilsMessengerCreateInfoEXT*) &debugCreateInfo;
-        } else {
+            createInfo.pNext = (VkDebugUtilsMessengerCreateInfoEXT*)&debugCreateInfo;
+        }
+        else {
             createInfo.enabledLayerCount = 0;
 
             createInfo.pNext = nullptr;
@@ -265,7 +274,7 @@ private:
         QueueFamilyIndices indices = findQueueFamilies(physicalDevice);
 
         std::vector<VkDeviceQueueCreateInfo> queueCreateInfos;
-        std::set<uint32_t> uniqueQueueFamilies = {indices.graphicsFamily.value(), indices.presentFamily.value()};
+        std::set<uint32_t> uniqueQueueFamilies = { indices.graphicsFamily.value(), indices.presentFamily.value() };
 
         float queuePriority = 1.0f;
         for (uint32_t queueFamily : uniqueQueueFamilies) {
@@ -293,7 +302,8 @@ private:
         if (enableValidationLayers) {
             createInfo.enabledLayerCount = static_cast<uint32_t>(validationLayers.size());
             createInfo.ppEnabledLayerNames = validationLayers.data();
-        } else {
+        }
+        else {
             createInfo.enabledLayerCount = 0;
         }
 
@@ -329,13 +339,14 @@ private:
         createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 
         QueueFamilyIndices indices = findQueueFamilies(physicalDevice);
-        uint32_t queueFamilyIndices[] = {indices.graphicsFamily.value(), indices.presentFamily.value()};
+        uint32_t queueFamilyIndices[] = { indices.graphicsFamily.value(), indices.presentFamily.value() };
 
         if (indices.graphicsFamily != indices.presentFamily) {
             createInfo.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
             createInfo.queueFamilyIndexCount = 2;
             createInfo.pQueueFamilyIndices = queueFamilyIndices;
-        } else {
+        }
+        else {
             createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
         }
 
@@ -426,7 +437,8 @@ private:
     }
 
     void createGraphicsPipeline() {
-        auto vertShaderCode = readFile(CHAPTER_NAME "/shaders/vert.spv");         auto fragShaderCode = readFile(CHAPTER_NAME "/shaders/frag.spv");
+        auto vertShaderCode = readFile(CHAPTER_NAME "/shaders/vert.spv");
+        auto fragShaderCode = readFile(CHAPTER_NAME "/shaders/frag.spv");
 
         VkShaderModule vertShaderModule = createShaderModule(vertShaderCode);
         VkShaderModule fragShaderModule = createShaderModule(fragShaderCode);
@@ -443,7 +455,7 @@ private:
         fragShaderStageInfo.module = fragShaderModule;
         fragShaderStageInfo.pName = "main";
 
-        VkPipelineShaderStageCreateInfo shaderStages[] = {vertShaderStageInfo, fragShaderStageInfo};
+        VkPipelineShaderStageCreateInfo shaderStages[] = { vertShaderStageInfo, fragShaderStageInfo };
 
         VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
         vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
@@ -569,13 +581,13 @@ private:
     }
 
     void createCommandBuffers() {
-        commandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+        commandBuffers.resize(MAX_FRAMES_IN_FLIGHT); // 改成创建多个
 
         VkCommandBufferAllocateInfo allocInfo{};
         allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
         allocInfo.commandPool = commandPool;
         allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        allocInfo.commandBufferCount = (uint32_t) commandBuffers.size();
+        allocInfo.commandBufferCount = (uint32_t)commandBuffers.size();
 
         if (vkAllocateCommandBuffers(device, &allocInfo, commandBuffers.data()) != VK_SUCCESS) {
             throw std::runtime_error("failed to allocate command buffers!");
@@ -594,32 +606,32 @@ private:
         renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
         renderPassInfo.renderPass = renderPass;
         renderPassInfo.framebuffer = swapChainFramebuffers[imageIndex];
-        renderPassInfo.renderArea.offset = {0, 0};
+        renderPassInfo.renderArea.offset = { 0, 0 };
         renderPassInfo.renderArea.extent = swapChainExtent;
 
-        VkClearValue clearColor = {{{0.0f, 0.0f, 0.0f, 1.0f}}};
+        VkClearValue clearColor = { {{0.0f, 0.0f, 0.0f, 1.0f}} };
         renderPassInfo.clearValueCount = 1;
         renderPassInfo.pClearValues = &clearColor;
 
         vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
 
-            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
 
-            VkViewport viewport{};
-            viewport.x = 0.0f;
-            viewport.y = 0.0f;
-            viewport.width = (float) swapChainExtent.width;
-            viewport.height = (float) swapChainExtent.height;
-            viewport.minDepth = 0.0f;
-            viewport.maxDepth = 1.0f;
-            vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+        VkViewport viewport{};
+        viewport.x = 0.0f;
+        viewport.y = 0.0f;
+        viewport.width = (float)swapChainExtent.width;
+        viewport.height = (float)swapChainExtent.height;
+        viewport.minDepth = 0.0f;
+        viewport.maxDepth = 1.0f;
+        vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
 
-            VkRect2D scissor{};
-            scissor.offset = {0, 0};
-            scissor.extent = swapChainExtent;
-            vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+        VkRect2D scissor{};
+        scissor.offset = { 0, 0 };
+        scissor.extent = swapChainExtent;
+        vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
-            vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+        vkCmdDraw(commandBuffer, 3, 1, 0, 0);
 
         vkCmdEndRenderPass(commandBuffer);
 
@@ -629,7 +641,7 @@ private:
     }
 
     void createSyncObjects() {
-        imageAvailableSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
+        imageAvailableSemaphores.resize(MAX_FRAMES_IN_FLIGHT); // 改成创建多个
         renderFinishedSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
         inFlightFences.resize(MAX_FRAMES_IN_FLIGHT);
 
@@ -640,7 +652,7 @@ private:
         fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
         fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
 
-        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) { // 循环创建
             if (vkCreateSemaphore(device, &semaphoreInfo, nullptr, &imageAvailableSemaphores[i]) != VK_SUCCESS ||
                 vkCreateSemaphore(device, &semaphoreInfo, nullptr, &renderFinishedSemaphores[i]) != VK_SUCCESS ||
                 vkCreateFence(device, &fenceInfo, nullptr, &inFlightFences[i]) != VK_SUCCESS) {
@@ -649,7 +661,7 @@ private:
         }
     }
 
-    void drawFrame() {
+    void drawFrame() { // 修改以使得每次都渲染到 currentFrame
         vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
         vkResetFences(device, 1, &inFlightFences[currentFrame]);
 
@@ -662,8 +674,8 @@ private:
         VkSubmitInfo submitInfo{};
         submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 
-        VkSemaphore waitSemaphores[] = {imageAvailableSemaphores[currentFrame]};
-        VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+        VkSemaphore waitSemaphores[] = { imageAvailableSemaphores[currentFrame] };
+        VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
         submitInfo.waitSemaphoreCount = 1;
         submitInfo.pWaitSemaphores = waitSemaphores;
         submitInfo.pWaitDstStageMask = waitStages;
@@ -671,7 +683,7 @@ private:
         submitInfo.commandBufferCount = 1;
         submitInfo.pCommandBuffers = &commandBuffers[currentFrame];
 
-        VkSemaphore signalSemaphores[] = {renderFinishedSemaphores[currentFrame]};
+        VkSemaphore signalSemaphores[] = { renderFinishedSemaphores[currentFrame] };
         submitInfo.signalSemaphoreCount = 1;
         submitInfo.pSignalSemaphores = signalSemaphores;
 
@@ -685,7 +697,7 @@ private:
         presentInfo.waitSemaphoreCount = 1;
         presentInfo.pWaitSemaphores = signalSemaphores;
 
-        VkSwapchainKHR swapChains[] = {swapChain};
+        VkSwapchainKHR swapChains[] = { swapChain };
         presentInfo.swapchainCount = 1;
         presentInfo.pSwapchains = swapChains;
 
@@ -693,7 +705,7 @@ private:
 
         vkQueuePresentKHR(presentQueue, &presentInfo);
 
-        currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
+        currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT; // 切换到下一帧
     }
 
     VkShaderModule createShaderModule(const std::vector<char>& code) {
@@ -733,7 +745,8 @@ private:
     VkExtent2D chooseSwapExtent(const VkSurfaceCapabilitiesKHR& capabilities) {
         if (capabilities.currentExtent.width != std::numeric_limits<uint32_t>::max()) {
             return capabilities.currentExtent;
-        } else {
+        }
+        else {
             int width, height;
             glfwGetFramebufferSize(window, &width, &height);
 
@@ -881,7 +894,7 @@ private:
             throw std::runtime_error("failed to open file!");
         }
 
-        size_t fileSize = (size_t) file.tellg();
+        size_t fileSize = (size_t)file.tellg();
         std::vector<char> buffer(fileSize);
 
         file.seekg(0);
@@ -904,7 +917,8 @@ int main() {
 
     try {
         app.run();
-    } catch (const std::exception& e) {
+    }
+    catch (const std::exception& e) {
         std::cerr << e.what() << std::endl;
         return EXIT_FAILURE;
     }

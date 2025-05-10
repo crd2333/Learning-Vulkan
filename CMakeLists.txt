@@ -2,9 +2,6 @@ cmake_minimum_required(VERSION 3.8)
 
 project(VulkanTutorial)
 
-# 添加 UTF-8 编译标志
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /utf-8")
-
 option(USE_WINDOWS_GUI "Build applications with Windows GUI subsystem" OFF) # 直接在 Windows 上运行，不开控制台
 
 # 确保src和shaders目录存在
@@ -162,18 +159,21 @@ add_chapter(22_descriptor_set_layout
 add_chapter(23_descriptor_sets
             SHADER 22_shader_ubo
             LIBS glm)
+add_chapter(23_descriptor_sets_variant
+            SHADER 22_shader_ubo_variant
+            LIBS glm)
 add_chapter(24_texture_image
-            SHADER 22_shader_ubo TEXTURES images/texture.jpg
+            SHADER 22_shader_ubo TEXTURES resources/texture.jpg
             LIBS glm)
 add_chapter(25_sampler
-            SHADER 22_shader_ubo TEXTURES images/texture.jpg
+            SHADER 22_shader_ubo TEXTURES resources/texture.jpg
             LIBS glm)
 add_chapter(26_texture_mapping
-            SHADER 26_shader_textures TEXTURES images/texture.jpg
+            SHADER 26_shader_textures TEXTURES resources/texture.jpg
             LIBS glm)
 add_chapter(27_depth_buffering
             SHADER 27_shader_depth
-            TEXTURES images/texture.jpg
+            TEXTURES resources/texture.jpg
             LIBS glm)
 add_chapter(28_model_loading
             SHADER 27_shader_depth

@@ -1,4 +1,4 @@
-#define GLFW_INCLUDE_VULKAN
+﻿#define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 // 把 #include <vulkan/vulkan.h> 替换为上述两行，这样 GLFW 将包含自己的定义并自动加载 Vulkan 头文件
 
@@ -52,7 +52,8 @@ int main() {
 
     try {
         app.run();
-    } catch (const std::exception& e) {
+    }
+    catch (const std::exception& e) {
         std::cerr << e.what() << std::endl;
         return EXIT_FAILURE;
     }

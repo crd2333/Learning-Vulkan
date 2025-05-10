@@ -1,4 +1,4 @@
-#define GLFW_INCLUDE_VULKAN
+﻿#define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
 #include <iostream>
@@ -19,7 +19,7 @@ const std::vector<const char*> validationLayers = {
     "VK_LAYER_KHRONOS_validation"
 };
 
-// Vulkan 没有“默认帧缓冲”的概念，需要一个基础设施包含缓冲区，这就是“交换链 swap-chain”，必须在启用扩展并显式创建（因为并非 vulkan 核心的一部分）
+// Vulkan 没有“默认帧缓冲”的概念，需要一个基础设施包含缓冲区，这就是“交换链 swap-chain”，必须启用扩展并显式创建（因为并非 vulkan 核心的一部分）
 // 交换链本质上是一个等待呈现到屏幕的图像队列，确切工作方式取决于其设置方式，但总体目的是将图像呈现与屏幕刷新率同步
 // 前面 04_logical_device 中我们没有对物理设备要求扩展，现在补上，这里声明一个必需的设备扩展列表（跟 validationLayers 一样）
 const std::vector<const char*> deviceExtensions = {
@@ -33,16 +33,17 @@ const bool enableValidationLayers = true;
 #endif
 
 VkResult CreateDebugUtilsMessengerEXT(VkInstance instance, const VkDebugUtilsMessengerCreateInfoEXT* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkDebugUtilsMessengerEXT* pDebugMessenger) {
-    auto func = (PFN_vkCreateDebugUtilsMessengerEXT) vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT");
+    auto func = (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT");
     if (func != nullptr) {
         return func(instance, pCreateInfo, pAllocator, pDebugMessenger);
-    } else {
+    }
+    else {
         return VK_ERROR_EXTENSION_NOT_PRESENT;
     }
 }
 
 void DestroyDebugUtilsMessengerEXT(VkInstance instance, VkDebugUtilsMessengerEXT debugMessenger, const VkAllocationCallbacks* pAllocator) {
-    auto func = (PFN_vkDestroyDebugUtilsMessengerEXT) vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT");
+    auto func = (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT");
     if (func != nullptr) {
         func(instance, debugMessenger, pAllocator);
     }
@@ -161,8 +162,9 @@ private:
             createInfo.ppEnabledLayerNames = validationLayers.data();
 
             populateDebugMessengerCreateInfo(debugCreateInfo);
-            createInfo.pNext = (VkDebugUtilsMessengerCreateInfoEXT*) &debugCreateInfo;
-        } else {
+            createInfo.pNext = (VkDebugUtilsMessengerCreateInfoEXT*)&debugCreateInfo;
+        }
+        else {
             createInfo.enabledLayerCount = 0;
 
             createInfo.pNext = nullptr;
@@ -225,7 +227,7 @@ private:
         QueueFamilyIndices indices = findQueueFamilies(physicalDevice);
 
         std::vector<VkDeviceQueueCreateInfo> queueCreateInfos;
-        std::set<uint32_t> uniqueQueueFamilies = {indices.graphicsFamily.value(), indices.presentFamily.value()};
+        std::set<uint32_t> uniqueQueueFamilies = { indices.graphicsFamily.value(), indices.presentFamily.value() };
 
         float queuePriority = 1.0f;
         for (uint32_t queueFamily : uniqueQueueFamilies) {
@@ -254,7 +256,8 @@ private:
         if (enableValidationLayers) {
             createInfo.enabledLayerCount = static_cast<uint32_t>(validationLayers.size());
             createInfo.ppEnabledLayerNames = validationLayers.data();
-        } else {
+        }
+        else {
             createInfo.enabledLayerCount = 0;
         }
 
@@ -292,18 +295,19 @@ private:
         createInfo.imageExtent = extent;
         createInfo.imageArrayLayers = 1; // 指定每个图像由多少层组成，除非正在开发立体 3D 应用程序，否则始终为 1
         createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT; // 指定交换链中图像的操作类型，这里直接渲染到它们，用作颜色附件
-                                                                     // 如果要先渲染到单独图像执行后处理，可以用 VK_IMAGE_USAGE_TRANSFER_DST_BIT
+        // 如果要先渲染到单独图像执行后处理，可以用 VK_IMAGE_USAGE_TRANSFER_DST_BIT
 
-        // 指定如何处理将在多个队列族中使用的交换链图像，如果图形队列族与呈现队列不同就是这种情况
+// 指定如何处理将在多个队列族中使用的交换链图像，如果图形队列族与呈现队列不同就是这种情况
         QueueFamilyIndices indices = findQueueFamilies(physicalDevice);
         if (indices.graphicsFamily != indices.presentFamily) { // 如果队列族不同，这里先使用并发模式，避免复杂的所有权讨论
-            uint32_t queueFamilyIndices[] = {indices.graphicsFamily.value(), indices.presentFamily.value()};
+            uint32_t queueFamilyIndices[] = { indices.graphicsFamily.value(), indices.presentFamily.value() };
             createInfo.imageSharingMode = VK_SHARING_MODE_CONCURRENT; // 图像可以在多个队列族之间使用，而无需显式的所有权传输
             createInfo.queueFamilyIndexCount = 2; // 并发模式要求预先指定将使用 queueFamilyIndexCount 和 pQueueFamilyIndices
             createInfo.pQueueFamilyIndices = queueFamilyIndices; // 在哪些队列族之间共享所有权
-        } else { // 大多数硬件还是相同的，用独占模式
+        }
+        else { // 大多数硬件还是相同的，用独占模式
             createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE; // 图像一次由一个队列族拥有，并且必须显式传输所有权
-                                                                     // 然后才能在另一个队列族中使用它，此选项提供最佳性能
+            // 然后才能在另一个队列族中使用它，此选项提供最佳性能
         }
 
         createInfo.preTransform = swapChainSupport.capabilities.currentTransform; // 是否应将某个变换应用于交换链中的图像 (if in capabilities.supportedTransforms)
@@ -312,7 +316,7 @@ private:
         createInfo.clipped = VK_TRUE; // 不关心被遮挡的像素的颜色，例如因为另一个窗口在它们前面，可以提高性能（有时候可能需要读回这些像素以获得某些结果）
 
         createInfo.oldSwapchain = VK_NULL_HANDLE; // 交换链可能会在应用程序运行时变为无效或未优化，例如调整窗口大小
-                                                  // 此时实际上需要从头开始创建交换链，并且必须在此指定对旧交换链的引用，这里先假设只会创建一个
+        // 此时实际上需要从头开始创建交换链，并且必须在此指定对旧交换链的引用，这里先假设只会创建一个
 
         if (vkCreateSwapchainKHR(device, &createInfo, nullptr, &swapChain) != VK_SUCCESS) {
             throw std::runtime_error("failed to create swap chain!");
@@ -367,7 +371,8 @@ private:
         // 通过在 VkSurfaceCapabilitiesKHR 的 currentExtent 成员中设置宽度和高度来匹配窗口的分辨率
         if (capabilities.currentExtent.width != std::numeric_limits<uint32_t>::max()) {
             return capabilities.currentExtent;
-        } else { // 但某些窗口管理器允许把这设为特殊的最大值来做自定义设置，这时选择最适合 minImageExtent 和 maxImageExtent 边界内窗口的分辨率
+        }
+        else { // 但某些窗口管理器允许把这设为特殊的最大值来做自定义设置，这时选择最适合 minImageExtent 和 maxImageExtent 边界内窗口的分辨率
             // 细节：glfw 在测量尺寸时使用两个单位：像素和屏幕坐标。例如，创建窗口时的 {WIDTH, HEIGHT} 分辨率就是以屏幕坐标测量，但 vulkan 使用像素
             // 高 DPI 显示器中更高的像素密度会导致前者分辨率大于后者，因此这里需要用 glfwGetFramebufferSize 查询窗口的像素分辨率
             int width, height;
@@ -530,7 +535,8 @@ int main() {
 
     try {
         app.run();
-    } catch (const std::exception& e) {
+    }
+    catch (const std::exception& e) {
         std::cerr << e.what() << std::endl;
         return EXIT_FAILURE;
     }

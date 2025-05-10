@@ -1,4 +1,4 @@
-#define GLFW_INCLUDE_VULKAN
+﻿#define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
 #include <iostream>
@@ -97,6 +97,9 @@ private:
         // VK_NV_external_memory_capabilities —— NVIDIA
         // VK_KHR_portability_enumeration —— Khronos Group
         // VK_LUNARG_direct_driver_loading —— LunarG
+        // 还有一些函数会在末尾有这些标识，比如
+        // vkAcquireNextImageKHR 用于交换链的图像获取
+        // vkQueuePresentKHR 用于交换链的图像呈现
     }
 };
 
@@ -105,7 +108,8 @@ int main() {
 
     try {
         app.run();
-    } catch (const std::exception& e) {
+    }
+    catch (const std::exception& e) {
         std::cerr << e.what() << std::endl;
         return EXIT_FAILURE;
     }

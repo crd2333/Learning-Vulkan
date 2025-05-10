@@ -1,4 +1,4 @@
-#define GLFW_INCLUDE_VULKAN
+﻿#define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
 #include <glm/glm.hpp>
@@ -15,6 +15,10 @@
 #include <array>
 #include <optional>
 #include <set>
+
+// 在接下来的几章中，我们将把顶点着色器中硬编码的顶点数据替换为内存中的顶点缓冲
+// 我们将从创建 CPU 可见缓冲并使用 memcpy 直接将顶点数据复制到其中的最简单方法开始，之后将使用暂存缓冲将顶点数据复制到高性能内存中
+// 注：本章还未创建顶点缓冲，无法运行是正常的
 
 const uint32_t WIDTH = 800;
 const uint32_t HEIGHT = 600;
@@ -36,16 +40,17 @@ const bool enableValidationLayers = true;
 #endif
 
 VkResult CreateDebugUtilsMessengerEXT(VkInstance instance, const VkDebugUtilsMessengerCreateInfoEXT* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkDebugUtilsMessengerEXT* pDebugMessenger) {
-    auto func = (PFN_vkCreateDebugUtilsMessengerEXT) vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT");
+    auto func = (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT");
     if (func != nullptr) {
         return func(instance, pCreateInfo, pAllocator, pDebugMessenger);
-    } else {
+    }
+    else {
         return VK_ERROR_EXTENSION_NOT_PRESENT;
     }
 }
 
 void DestroyDebugUtilsMessengerEXT(VkInstance instance, VkDebugUtilsMessengerEXT debugMessenger, const VkAllocationCallbacks* pAllocator) {
-    auto func = (PFN_vkDestroyDebugUtilsMessengerEXT) vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT");
+    auto func = (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT");
     if (func != nullptr) {
         func(instance, debugMessenger, pAllocator);
     }
@@ -66,36 +71,50 @@ struct SwapChainSupportDetails {
     std::vector<VkPresentModeKHR> presentModes;
 };
 
+// 创建一个 Vertex 结构体
 struct Vertex {
     glm::vec2 pos;
     glm::vec3 color;
 
+    // 将 CPU 缓冲中顶点数据的存放方式传递给 GPU 加载到显存中
     static VkVertexInputBindingDescription getBindingDescription() {
         VkVertexInputBindingDescription bindingDescription{};
-        bindingDescription.binding = 0;
-        bindingDescription.stride = sizeof(Vertex);
-        bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+        bindingDescription.binding = 0;             // 指定绑定数组中绑定的索引
+        bindingDescription.stride = sizeof(Vertex); // 数据条目之间的字节数
+        bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX; // 在每个顶点之后还是在每个实例之后移动到下一个数据条目
 
         return bindingDescription;
     }
 
+    // AttributeDescription 结构描述了如何从来自绑定描述的顶点数据块中提取顶点属性
     static std::array<VkVertexInputAttributeDescription, 2> getAttributeDescriptions() {
-        std::array<VkVertexInputAttributeDescription, 2> attributeDescriptions{};
+        std::array<VkVertexInputAttributeDescription, 2> attributeDescriptions{}; // 有两个属性，需要两个 AttributeDescriptions
 
-        attributeDescriptions[0].binding = 0;
-        attributeDescriptions[0].location = 0;
-        attributeDescriptions[0].format = VK_FORMAT_R32G32_SFLOAT;
-        attributeDescriptions[0].offset = offsetof(Vertex, pos);
+        attributeDescriptions[0].binding = 0;                      // 来自哪个绑定
+        attributeDescriptions[0].location = 0;                     // 对应顶点着色器中 `layout(location = xxx) in`
+        attributeDescriptions[0].format = VK_FORMAT_R32G32_SFLOAT; // 两个 32 位浮点数 (vec2)
+        attributeDescriptions[0].offset = offsetof(Vertex, pos);   // 从每个顶点数据开头的偏移量
 
         attributeDescriptions[1].binding = 0;
         attributeDescriptions[1].location = 1;
         attributeDescriptions[1].format = VK_FORMAT_R32G32B32_SFLOAT;
         attributeDescriptions[1].offset = offsetof(Vertex, color);
 
+        // format 使用与颜色格式相同的枚举来指定（哪怕你不是颜色），以下类型与格式常常一起使用
+        // float：VK_FORMAT_R32_SFLOAT
+        // vec2：VK_FORMAT_R32G32_SFLOAT
+        // vec3：VK_FORMAT_R32G32B32_SFLOAT
+        // vec4：VK_FORMAT_R32G32B32A32_SFLOAT
+        // ivec2：VK_FORMAT_R32G32_SINT，2 分量 32 位有符号整数向量
+        // uvec4：VK_FORMAT_R32G32B32A32_UINT，4 分量 32 位无符号整数向量
+        // double：VK_FORMAT_R64_SFLOAT，双精度 (64bit) 浮点数
+
         return attributeDescriptions;
     }
 };
 
+// 使用 Vertex 结构来指定顶点数据数组
+// *交错*顶点属性 (interleaving vertex attributes)：位置跟颜色值合成一个顶点数组
 const std::vector<Vertex> vertices = {
     {{0.0f, -0.5f}, {1.0f, 0.0f, 0.0f}},
     {{0.5f, 0.5f}, {0.0f, 1.0f, 0.0f}},
@@ -270,8 +289,9 @@ private:
             createInfo.ppEnabledLayerNames = validationLayers.data();
 
             populateDebugMessengerCreateInfo(debugCreateInfo);
-            createInfo.pNext = (VkDebugUtilsMessengerCreateInfoEXT*) &debugCreateInfo;
-        } else {
+            createInfo.pNext = (VkDebugUtilsMessengerCreateInfoEXT*)&debugCreateInfo;
+        }
+        else {
             createInfo.enabledLayerCount = 0;
 
             createInfo.pNext = nullptr;
@@ -334,7 +354,7 @@ private:
         QueueFamilyIndices indices = findQueueFamilies(physicalDevice);
 
         std::vector<VkDeviceQueueCreateInfo> queueCreateInfos;
-        std::set<uint32_t> uniqueQueueFamilies = {indices.graphicsFamily.value(), indices.presentFamily.value()};
+        std::set<uint32_t> uniqueQueueFamilies = { indices.graphicsFamily.value(), indices.presentFamily.value() };
 
         float queuePriority = 1.0f;
         for (uint32_t queueFamily : uniqueQueueFamilies) {
@@ -362,7 +382,8 @@ private:
         if (enableValidationLayers) {
             createInfo.enabledLayerCount = static_cast<uint32_t>(validationLayers.size());
             createInfo.ppEnabledLayerNames = validationLayers.data();
-        } else {
+        }
+        else {
             createInfo.enabledLayerCount = 0;
         }
 
@@ -398,13 +419,14 @@ private:
         createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 
         QueueFamilyIndices indices = findQueueFamilies(physicalDevice);
-        uint32_t queueFamilyIndices[] = {indices.graphicsFamily.value(), indices.presentFamily.value()};
+        uint32_t queueFamilyIndices[] = { indices.graphicsFamily.value(), indices.presentFamily.value() };
 
         if (indices.graphicsFamily != indices.presentFamily) {
             createInfo.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
             createInfo.queueFamilyIndexCount = 2;
             createInfo.pQueueFamilyIndices = queueFamilyIndices;
-        } else {
+        }
+        else {
             createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
         }
 
@@ -493,7 +515,8 @@ private:
     }
 
     void createGraphicsPipeline() {
-        auto vertShaderCode = readFile(CHAPTER_NAME "/shaders/vert.spv");         auto fragShaderCode = readFile(CHAPTER_NAME "/shaders/frag.spv");
+        auto vertShaderCode = readFile(CHAPTER_NAME "/shaders/vert.spv");
+        auto fragShaderCode = readFile(CHAPTER_NAME "/shaders/frag.spv");
 
         VkShaderModule vertShaderModule = createShaderModule(vertShaderCode);
         VkShaderModule fragShaderModule = createShaderModule(fragShaderCode);
@@ -510,11 +533,12 @@ private:
         fragShaderStageInfo.module = fragShaderModule;
         fragShaderStageInfo.pName = "main";
 
-        VkPipelineShaderStageCreateInfo shaderStages[] = {vertShaderStageInfo, fragShaderStageInfo};
+        VkPipelineShaderStageCreateInfo shaderStages[] = { vertShaderStageInfo, fragShaderStageInfo };
 
         VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
         vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
 
+        // 修改图形管线以接受此格式的顶点数据
         auto bindingDescription = Vertex::getBindingDescription();
         auto attributeDescriptions = Vertex::getAttributeDescriptions();
 
@@ -648,7 +672,7 @@ private:
         allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
         allocInfo.commandPool = commandPool;
         allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        allocInfo.commandBufferCount = (uint32_t) commandBuffers.size();
+        allocInfo.commandBufferCount = (uint32_t)commandBuffers.size();
 
         if (vkAllocateCommandBuffers(device, &allocInfo, commandBuffers.data()) != VK_SUCCESS) {
             throw std::runtime_error("failed to allocate command buffers!");
@@ -667,32 +691,32 @@ private:
         renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
         renderPassInfo.renderPass = renderPass;
         renderPassInfo.framebuffer = swapChainFramebuffers[imageIndex];
-        renderPassInfo.renderArea.offset = {0, 0};
+        renderPassInfo.renderArea.offset = { 0, 0 };
         renderPassInfo.renderArea.extent = swapChainExtent;
 
-        VkClearValue clearColor = {{{0.0f, 0.0f, 0.0f, 1.0f}}};
+        VkClearValue clearColor = { {{0.0f, 0.0f, 0.0f, 1.0f}} };
         renderPassInfo.clearValueCount = 1;
         renderPassInfo.pClearValues = &clearColor;
 
         vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
 
-            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
 
-            VkViewport viewport{};
-            viewport.x = 0.0f;
-            viewport.y = 0.0f;
-            viewport.width = (float) swapChainExtent.width;
-            viewport.height = (float) swapChainExtent.height;
-            viewport.minDepth = 0.0f;
-            viewport.maxDepth = 1.0f;
-            vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+        VkViewport viewport{};
+        viewport.x = 0.0f;
+        viewport.y = 0.0f;
+        viewport.width = (float)swapChainExtent.width;
+        viewport.height = (float)swapChainExtent.height;
+        viewport.minDepth = 0.0f;
+        viewport.maxDepth = 1.0f;
+        vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
 
-            VkRect2D scissor{};
-            scissor.offset = {0, 0};
-            scissor.extent = swapChainExtent;
-            vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+        VkRect2D scissor{};
+        scissor.offset = { 0, 0 };
+        scissor.extent = swapChainExtent;
+        vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
-            vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+        vkCmdDraw(commandBuffer, 3, 1, 0, 0);
 
         vkCmdEndRenderPass(commandBuffer);
 
@@ -731,7 +755,8 @@ private:
         if (result == VK_ERROR_OUT_OF_DATE_KHR) {
             recreateSwapChain();
             return;
-        } else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+        }
+        else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
             throw std::runtime_error("failed to acquire swap chain image!");
         }
 
@@ -743,8 +768,8 @@ private:
         VkSubmitInfo submitInfo{};
         submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 
-        VkSemaphore waitSemaphores[] = {imageAvailableSemaphores[currentFrame]};
-        VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+        VkSemaphore waitSemaphores[] = { imageAvailableSemaphores[currentFrame] };
+        VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
         submitInfo.waitSemaphoreCount = 1;
         submitInfo.pWaitSemaphores = waitSemaphores;
         submitInfo.pWaitDstStageMask = waitStages;
@@ -752,7 +777,7 @@ private:
         submitInfo.commandBufferCount = 1;
         submitInfo.pCommandBuffers = &commandBuffers[currentFrame];
 
-        VkSemaphore signalSemaphores[] = {renderFinishedSemaphores[currentFrame]};
+        VkSemaphore signalSemaphores[] = { renderFinishedSemaphores[currentFrame] };
         submitInfo.signalSemaphoreCount = 1;
         submitInfo.pSignalSemaphores = signalSemaphores;
 
@@ -766,7 +791,7 @@ private:
         presentInfo.waitSemaphoreCount = 1;
         presentInfo.pWaitSemaphores = signalSemaphores;
 
-        VkSwapchainKHR swapChains[] = {swapChain};
+        VkSwapchainKHR swapChains[] = { swapChain };
         presentInfo.swapchainCount = 1;
         presentInfo.pSwapchains = swapChains;
 
@@ -777,7 +802,8 @@ private:
         if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || framebufferResized) {
             framebufferResized = false;
             recreateSwapChain();
-        } else if (result != VK_SUCCESS) {
+        }
+        else if (result != VK_SUCCESS) {
             throw std::runtime_error("failed to present swap chain image!");
         }
 
@@ -821,7 +847,8 @@ private:
     VkExtent2D chooseSwapExtent(const VkSurfaceCapabilitiesKHR& capabilities) {
         if (capabilities.currentExtent.width != std::numeric_limits<uint32_t>::max()) {
             return capabilities.currentExtent;
-        } else {
+        }
+        else {
             int width, height;
             glfwGetFramebufferSize(window, &width, &height);
 
@@ -969,7 +996,7 @@ private:
             throw std::runtime_error("failed to open file!");
         }
 
-        size_t fileSize = (size_t) file.tellg();
+        size_t fileSize = (size_t)file.tellg();
         std::vector<char> buffer(fileSize);
 
         file.seekg(0);
@@ -992,7 +1019,8 @@ int main() {
 
     try {
         app.run();
-    } catch (const std::exception& e) {
+    }
+    catch (const std::exception& e) {
         std::cerr << e.what() << std::endl;
         return EXIT_FAILURE;
     }

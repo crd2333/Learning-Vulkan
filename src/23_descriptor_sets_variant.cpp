@@ -1,12 +1,15 @@
 ﻿#define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
+#define GLM_FORCE_RADIANS
 #include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 
 #include <iostream>
 #include <fstream>
 #include <stdexcept>
 #include <algorithm>
+#include <chrono>
 #include <vector>
 #include <cstring>
 #include <cstdlib>
@@ -16,10 +19,19 @@
 #include <optional>
 #include <set>
 
+// 实际上，多个描述符可以指向同一个缓冲区，然后归属于不同的描述符集，再绑定到同一个管线布局上，以此实现逐对象和全局的 UBO
+// 可能会想，这个需求通过单个 set 的不同 binding 不是也能实现吗？
+// 即，给一个管线布局分配一个 DescriptorSetLayout，绑定单个 set，这个 set 里有两个 binding，一个逐对象一个全局
+// 但是，由于 recordCommandBuffer() 里绑定描述符 vkCmdBindDescriptorSets 是以 set 为单位，这样那个全局的 binding 实际上也是每次都要重新绑定
+// 因此，我们更倾向于按照更新频率来划分 descriptor set，把逐对象数据、逐通道/材质数据、每帧（全局）数据分开成多个 set，每个 set 内可以有多个 binding，不仅降低绑定开销，也更加模块化
+// 本章试图把 MVP 矩阵的 M 和 VP 分开到两个 set 中去，实现两帧 in-flight，每帧绘制两个物体，这样 VP 可以少更新一次。每个 discriptor 内依然是一个 binding
+// 个人也是初学者，可能有不妥之处，请谨慎参考
+
 const uint32_t WIDTH = 800;
 const uint32_t HEIGHT = 600;
 
 const int MAX_FRAMES_IN_FLIGHT = 2;
+const int MAX_OBJECTS = 2;
 
 const std::vector<const char*> validationLayers = {
     "VK_LAYER_KHRONOS_validation"
@@ -97,10 +109,24 @@ struct Vertex {
     }
 };
 
+// 全局（每帧） ubo 与逐对象 ubo
+struct UniformBufferObject1 {
+    alignas(16) glm::mat4 view;
+    alignas(16) glm::mat4 proj;
+};
+struct UniformBufferObject2 {
+    alignas(16) glm::mat4 model;
+};
+
 const std::vector<Vertex> vertices = {
-    {{0.0f, -0.5f}, {1.0f, 0.0f, 0.0f}},
-    {{0.5f, 0.5f}, {0.0f, 1.0f, 0.0f}},
-    {{-0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}}
+    {{-0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}},
+    {{0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}},
+    {{0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}},
+    {{-0.5f, 0.5f}, {1.0f, 1.0f, 1.0f}}
+};
+
+const std::vector<uint16_t> indices = {
+    0, 1, 2, 2, 3, 0
 };
 
 class HelloTriangleApplication {
@@ -133,13 +159,29 @@ private:
     std::vector<VkFramebuffer> swapChainFramebuffers;
 
     VkRenderPass renderPass;
+    VkDescriptorSetLayout descriptorSetLayout;
+    VkDescriptorSetLayout descriptorSetLayoutPerObject; // 增加逐对象的 descriptor set layout
     VkPipelineLayout pipelineLayout;
     VkPipeline graphicsPipeline;
 
     VkCommandPool commandPool;
 
-    VkBuffer vertexBuffer; // 保存顶点缓冲（对象）以及为其分配的内存的句柄
+    VkBuffer vertexBuffer;
     VkDeviceMemory vertexBufferMemory;
+    VkBuffer indexBuffer;
+    VkDeviceMemory indexBufferMemory;
+
+    std::vector<VkBuffer> uniformBuffers;
+    std::vector<VkDeviceMemory> uniformBuffersMemory;
+    std::vector<void*> uniformBuffersMapped;
+    std::vector<VkBuffer> uniformBuffersPerObject; // 增加逐对象的 uniform buffer
+    std::vector<VkDeviceMemory> uniformBuffersMemoryPerObject;
+    std::vector<void*> uniformBuffersMappedPerObject;
+
+    VkDescriptorPool descriptorPool;
+    std::vector<VkDescriptorSet> descriptorSets;
+    VkDescriptorPool descriptorPoolPerObject; // 增加逐对象的 descriptor pool
+    std::vector<VkDescriptorSet> descriptorSetsPerObject; // 增加逐对象的 descriptor set
 
     std::vector<VkCommandBuffer> commandBuffers;
 
@@ -174,10 +216,15 @@ private:
         createSwapChain();
         createImageViews();
         createRenderPass();
+        createDescriptorSetLayout();
         createGraphicsPipeline();
         createFramebuffers();
         createCommandPool();
-        createVertexBuffer(); // 新添加一个函数
+        createVertexBuffer();
+        createIndexBuffer();
+        createUniformBuffers();
+        createDescriptorPool();
+        createDescriptorSets();
         createCommandBuffers();
         createSyncObjects();
     }
@@ -210,7 +257,25 @@ private:
         vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
         vkDestroyRenderPass(device, renderPass, nullptr);
 
-        vkDestroyBuffer(device, vertexBuffer, nullptr); // 在 cleanup 中释放（不在 cleanupSwapChain 中释放，因为它不依赖于交换链）
+        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+            vkDestroyBuffer(device, uniformBuffers[i], nullptr);
+            vkFreeMemory(device, uniformBuffersMemory[i], nullptr);
+        }
+        for (size_t i = 0; i < MAX_OBJECTS * MAX_FRAMES_IN_FLIGHT; i++) {
+            vkDestroyBuffer(device, uniformBuffersPerObject[i], nullptr);
+            vkFreeMemory(device, uniformBuffersMemoryPerObject[i], nullptr);
+        }
+
+        vkDestroyDescriptorPool(device, descriptorPool, nullptr);
+        vkDestroyDescriptorPool(device, descriptorPoolPerObject, nullptr);
+
+        vkDestroyDescriptorSetLayout(device, descriptorSetLayout, nullptr);
+        vkDestroyDescriptorSetLayout(device, descriptorSetLayoutPerObject, nullptr);
+
+        vkDestroyBuffer(device, indexBuffer, nullptr);
+        vkFreeMemory(device, indexBufferMemory, nullptr);
+
+        vkDestroyBuffer(device, vertexBuffer, nullptr);
         vkFreeMemory(device, vertexBufferMemory, nullptr);
 
         for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
@@ -504,6 +569,26 @@ private:
         }
     }
 
+    void createDescriptorSetLayout() {
+        // 两个 descriptor set layouts 拥有 common binding configuration
+        VkDescriptorSetLayoutBinding uboLayoutBinding{};
+        uboLayoutBinding.binding = 0;
+        uboLayoutBinding.descriptorCount = 1;
+        uboLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        uboLayoutBinding.pImmutableSamplers = nullptr;
+        uboLayoutBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
+        VkDescriptorSetLayoutCreateInfo layoutInfo{};
+        layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        layoutInfo.bindingCount = 1;
+        layoutInfo.pBindings = &uboLayoutBinding;
+
+        if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &descriptorSetLayout) != VK_SUCCESS ||
+            vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &descriptorSetLayoutPerObject) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create descriptor set layouts!");
+        }
+    }
+
     void createGraphicsPipeline() {
         auto vertShaderCode = readFile(CHAPTER_NAME "/shaders/vert.spv");
         auto fragShaderCode = readFile(CHAPTER_NAME "/shaders/frag.spv");
@@ -553,7 +638,7 @@ private:
         rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
         rasterizer.lineWidth = 1.0f;
         rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
-        rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
+        rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
         rasterizer.depthBiasEnable = VK_FALSE;
 
         VkPipelineMultisampleStateCreateInfo multisampling{};
@@ -587,8 +672,11 @@ private:
 
         VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
         pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-        pipelineLayoutInfo.setLayoutCount = 0;
-        pipelineLayoutInfo.pushConstantRangeCount = 0;
+
+        // 改为给管线布局绑定两个 descriptor set layout
+        std::array<VkDescriptorSetLayout, 2> descriptorSetLayouts = { descriptorSetLayout, descriptorSetLayoutPerObject };
+        pipelineLayoutInfo.setLayoutCount = static_cast<uint32_t>(descriptorSetLayouts.size());
+        pipelineLayoutInfo.pSetLayouts = descriptorSetLayouts.data();
 
         if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS) {
             throw std::runtime_error("failed to create pipeline layout!");
@@ -650,76 +738,238 @@ private:
         poolInfo.queueFamilyIndex = queueFamilyIndices.graphicsFamily.value();
 
         if (vkCreateCommandPool(device, &poolInfo, nullptr, &commandPool) != VK_SUCCESS) {
-            throw std::runtime_error("failed to create command pool!");
+            throw std::runtime_error("failed to create graphics command pool!");
         }
     }
 
     void createVertexBuffer() {
-        // 填写缓冲的结构体
-        VkBufferCreateInfo bufferInfo{};
-        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-        bufferInfo.size = sizeof(vertices[0]) * vertices.size(); // 缓冲的大小
-        bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;    // 缓冲的用途，可以使用按位或来指定多个目的。这里用作 VertexBuffer
-        bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;      // 跟交换链中的图像一样，缓冲也可以由特定的队列族拥有，或者在多个队列族之间共享。这里设为独占（仅从图形队列中使用）
-        bufferInfo.flags = 0;                                    // optional，用于配置稀疏缓冲内存，这里不需要
+        VkDeviceSize bufferSize = sizeof(vertices[0]) * vertices.size();
 
-        if (vkCreateBuffer(device, &bufferInfo, nullptr, &vertexBuffer) != VK_SUCCESS) {
-            throw std::runtime_error("failed to create vertex buffer!");
+        VkBuffer stagingBuffer;
+        VkDeviceMemory stagingBufferMemory;
+        createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
+
+        void* data;
+        vkMapMemory(device, stagingBufferMemory, 0, bufferSize, 0, &data);
+        memcpy(data, vertices.data(), (size_t)bufferSize);
+        vkUnmapMemory(device, stagingBufferMemory);
+
+        createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, vertexBuffer, vertexBufferMemory);
+
+        copyBuffer(stagingBuffer, vertexBuffer, bufferSize);
+
+        vkDestroyBuffer(device, stagingBuffer, nullptr);
+        vkFreeMemory(device, stagingBufferMemory, nullptr);
+    }
+
+    void createIndexBuffer() {
+        VkDeviceSize bufferSize = sizeof(indices[0]) * indices.size();
+
+        VkBuffer stagingBuffer;
+        VkDeviceMemory stagingBufferMemory;
+        createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
+
+        void* data;
+        vkMapMemory(device, stagingBufferMemory, 0, bufferSize, 0, &data);
+        memcpy(data, indices.data(), (size_t)bufferSize);
+        vkUnmapMemory(device, stagingBufferMemory);
+
+        createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, indexBuffer, indexBufferMemory);
+
+        copyBuffer(stagingBuffer, indexBuffer, bufferSize);
+
+        vkDestroyBuffer(device, stagingBuffer, nullptr);
+        vkFreeMemory(device, stagingBufferMemory, nullptr);
+    }
+
+    void createUniformBuffers() {
+        // 全局 uniform buffer，每帧一个
+        VkDeviceSize bufferSize = sizeof(UniformBufferObject1);
+        uniformBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+        uniformBuffersMemory.resize(MAX_FRAMES_IN_FLIGHT);
+        uniformBuffersMapped.resize(MAX_FRAMES_IN_FLIGHT);
+        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+            createBuffer(bufferSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, uniformBuffers[i], uniformBuffersMemory[i]);
+            vkMapMemory(device, uniformBuffersMemory[i], 0, bufferSize, 0, &uniformBuffersMapped[i]);
         }
 
-        // 缓冲已经创建，但只是一个对象，还没有真正分配内存
+        // 逐对象的 uniform buffer，需要有 MAX_OBJECTS * MAX_FRAMES_IN_FLIGHT 个
+        VkDeviceSize bufferSizePerObject = sizeof(UniformBufferObject2);
+        uniformBuffersPerObject.resize(MAX_OBJECTS * MAX_FRAMES_IN_FLIGHT);
+        uniformBuffersMemoryPerObject.resize(MAX_OBJECTS * MAX_FRAMES_IN_FLIGHT);
+        uniformBuffersMappedPerObject.resize(MAX_OBJECTS * MAX_FRAMES_IN_FLIGHT);
+        for (size_t i = 0; i < MAX_OBJECTS * MAX_FRAMES_IN_FLIGHT; i++) {
+            createBuffer(bufferSizePerObject, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, uniformBuffersPerObject[i], uniformBuffersMemoryPerObject[i]);
+            vkMapMemory(device, uniformBuffersMemoryPerObject[i], 0, bufferSizePerObject, 0, &uniformBuffersMappedPerObject[i]);
+        }
+    }
+
+    void createDescriptorPool() {
+        // 逐帧的 descriptor pool
+        VkDescriptorPoolSize poolSize{};
+        poolSize.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        poolSize.descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
+
+        VkDescriptorPoolCreateInfo poolInfo{};
+        poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        poolInfo.poolSizeCount = 1;
+        poolInfo.pPoolSizes = &poolSize;
+        poolInfo.maxSets = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
+
+        if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create descriptor pool!");
+        }
+
+        // 逐对象的 descriptor pool
+        VkDescriptorPoolSize poolSizePerObject{};
+        poolSizePerObject.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        poolSizePerObject.descriptorCount = static_cast<uint32_t>(MAX_OBJECTS * MAX_FRAMES_IN_FLIGHT);
+
+        VkDescriptorPoolCreateInfo poolInfoPerObject{};
+        poolInfoPerObject.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        poolInfoPerObject.poolSizeCount = 1;
+        poolInfoPerObject.pPoolSizes = &poolSizePerObject;
+        poolInfoPerObject.maxSets = static_cast<uint32_t>(MAX_OBJECTS * MAX_FRAMES_IN_FLIGHT);
+
+        if (vkCreateDescriptorPool(device, &poolInfoPerObject, nullptr, &descriptorPoolPerObject) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create descriptor pool for per-object uniform buffers!");
+        }
+    }
+
+    void createDescriptorSets() {
+        // 逐帧的 descriptor sets
+        std::vector<VkDescriptorSetLayout> layouts(MAX_FRAMES_IN_FLIGHT, descriptorSetLayout);
+        VkDescriptorSetAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        allocInfo.descriptorPool = descriptorPool;
+        allocInfo.descriptorSetCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
+        allocInfo.pSetLayouts = layouts.data();
+
+        descriptorSets.resize(MAX_FRAMES_IN_FLIGHT);
+        if (vkAllocateDescriptorSets(device, &allocInfo, descriptorSets.data()) != VK_SUCCESS) {
+            throw std::runtime_error("failed to allocate descriptor sets!");
+        }
+
+        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+            VkDescriptorBufferInfo bufferInfo{};
+            bufferInfo.buffer = uniformBuffers[i];
+            bufferInfo.offset = 0;
+            bufferInfo.range = sizeof(UniformBufferObject1);
+
+            VkWriteDescriptorSet descriptorWrite{};
+            descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrite.dstSet = descriptorSets[i];
+            descriptorWrite.dstBinding = 0;
+            descriptorWrite.dstArrayElement = 0;
+            descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            descriptorWrite.descriptorCount = 1;
+            descriptorWrite.pBufferInfo = &bufferInfo;
+
+            vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+        }
+
+        // 逐对象的 descriptor sets
+        std::vector<VkDescriptorSetLayout> layoutsPerObject(MAX_OBJECTS * MAX_FRAMES_IN_FLIGHT, descriptorSetLayoutPerObject);
+        VkDescriptorSetAllocateInfo allocInfoPerObject{};
+        allocInfoPerObject.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        allocInfoPerObject.descriptorPool = descriptorPoolPerObject;
+        allocInfoPerObject.descriptorSetCount = static_cast<uint32_t>(MAX_OBJECTS * MAX_FRAMES_IN_FLIGHT);
+        allocInfoPerObject.pSetLayouts = layoutsPerObject.data();
+
+        descriptorSetsPerObject.resize(MAX_OBJECTS * MAX_FRAMES_IN_FLIGHT);
+        if (vkAllocateDescriptorSets(device, &allocInfoPerObject, descriptorSetsPerObject.data()) != VK_SUCCESS) {
+            throw std::runtime_error("failed to allocate descriptor sets for per-object uniform buffers!");
+        }
+
+        for (size_t i = 0; i < MAX_OBJECTS * MAX_FRAMES_IN_FLIGHT; i++) {
+            VkDescriptorBufferInfo bufferInfo{};
+            bufferInfo.buffer = uniformBuffersPerObject[i];
+            bufferInfo.offset = 0;
+            bufferInfo.range = sizeof(UniformBufferObject2);
+
+            VkWriteDescriptorSet descriptorWrite{};
+            descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrite.dstSet = descriptorSetsPerObject[i];
+            descriptorWrite.dstBinding = 0;
+            descriptorWrite.dstArrayElement = 0;
+            descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            descriptorWrite.descriptorCount = 1;
+            descriptorWrite.pBufferInfo = &bufferInfo;
+
+            vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+        }
+    }
+
+    void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& bufferMemory) {
+        VkBufferCreateInfo bufferInfo{};
+        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufferInfo.size = size;
+        bufferInfo.usage = usage;
+        bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+        if (vkCreateBuffer(device, &bufferInfo, nullptr, &buffer) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create buffer!");
+        }
+
         VkMemoryRequirements memRequirements;
-        vkGetBufferMemoryRequirements(device, vertexBuffer, &memRequirements); // 查询其内存需求
-        // VkMemoryRequirements 有三个字段
-        // size：所需内存量的大小，以字节为单位，可能与 bufferInfo.size 不同
-        // alignment：缓冲在已分配的内存区域中开始的字节偏移量，取决于 bufferInfo.usage 和 bufferInfo.flags
-        // memoryTypeBits：适用于缓冲的内存类型的位字段
+        vkGetBufferMemoryRequirements(device, buffer, &memRequirements);
 
         VkMemoryAllocateInfo allocInfo{};
         allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
         allocInfo.allocationSize = memRequirements.size;
-        // VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT 指示能从 CPU 写入它，VK_MEMORY_PROPERTY_HOST_COHERENT_BIT 指示使用主机一致的内存堆（确保映射的内存始终与已分配内存的内容匹配）
-        allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, properties);
 
-        if (vkAllocateMemory(device, &allocInfo, nullptr, &vertexBufferMemory) != VK_SUCCESS) { // 调用函数实际分配内存
-            throw std::runtime_error("failed to allocate vertex buffer memory!");
+        if (vkAllocateMemory(device, &allocInfo, nullptr, &bufferMemory) != VK_SUCCESS) {
+            throw std::runtime_error("failed to allocate buffer memory!");
         }
 
-        vkBindBufferMemory(device, vertexBuffer, vertexBufferMemory, 0); // 并且绑定起来
-
-        // 将顶点数据复制到缓冲
-        void* data;
-        // 将缓冲内存映射到 CPU 可访问的内存
-        // 前两个参数不多说，第三、四个参数是偏移量和大小（也可以指定特殊值 VK_WHOLE_SIZE 来映射所有内存）
-        // 第五个参数可用于指定标志，但当前 API 中尚无任何可用标志 (?)，必须设置为值 0
-        // 第六个参数作为返回值，一个指向映射内存的指针
-        vkMapMemory(device, vertexBufferMemory, 0, bufferInfo.size, 0, &data);
-        // 将顶点数据复制到映射的内存
-        // 但驱动程序可能不会立即将数据复制到缓冲内存中，例如由于 Cache，也可能对缓冲区的写入在映射的内存中尚不可见，有两种方法可以解决
-        // 1. 填充 VkMemoryAllocateInfo 的时候指示使用主机一致的内存堆（我们的做法）
-        // 2. 写入映射的内存后调用 vkFlushMappedMemoryRanges，并在从映射的内存读取之前调用 vkInvalidateMappedMemoryRanges
-        // 第一种做法可能性能稍差，但在下一章的优化后变得无关紧要
-        // 无论哪种都不意味着它们实际上在 GPU 上可见，只是保证在下次调用 vkQueueSubmit 时完成
-        memcpy(data, vertices.data(), (size_t)bufferInfo.size);
-        vkUnmapMemory(device, vertexBufferMemory); // 取消映射
+        vkBindBufferMemory(device, buffer, bufferMemory, 0);
     }
 
-    // 显卡可以提供不同类型的内存进行分配，每种类型在允许的操作和性能特征方面有所不同
-    // 缓冲提出了一些需求，我们可以结合自己应用程序选择合适的内存类型
+    void copyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size) {
+        VkCommandBufferAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        allocInfo.commandPool = commandPool;
+        allocInfo.commandBufferCount = 1;
+
+        VkCommandBuffer commandBuffer;
+        vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer);
+
+        VkCommandBufferBeginInfo beginInfo{};
+        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+        vkBeginCommandBuffer(commandBuffer, &beginInfo);
+
+        VkBufferCopy copyRegion{};
+        copyRegion.size = size;
+        vkCmdCopyBuffer(commandBuffer, srcBuffer, dstBuffer, 1, &copyRegion);
+
+        vkEndCommandBuffer(commandBuffer);
+
+        VkSubmitInfo submitInfo{};
+        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submitInfo.commandBufferCount = 1;
+        submitInfo.pCommandBuffers = &commandBuffer;
+
+        vkQueueSubmit(graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
+        vkQueueWaitIdle(graphicsQueue);
+
+        vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
+    }
+
     uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {
         VkPhysicalDeviceMemoryProperties memProperties;
-        vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties); // 查询设备支持的可用内存类型
-        // VkPhysicalDeviceMemoryProperties 结构体有两个数组 VkMemoryType[] memoryTypes 和 VkMemoryHeap[] memoryHeaps
-        // 内存堆是不同的内存资源，例如专用 VRAM 和 RAM 中的交换空间（以在 VRAM 耗尽时使用）。不同的内存类型存在于不同堆中，现在我们只关心内存类型（但可以想见不同堆会影响性能）
+        vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
 
         for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
-            // typeFilter 筛选适合顶点缓冲的内存类型，properties 从 memProperties 筛选我们额外的需求
             if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
                 return i;
             }
         }
 
-        throw std::runtime_error("failed to find suitable memory type!"); // 如果没找到就抛出异常
+        throw std::runtime_error("failed to find suitable memory type!");
     }
 
     void createCommandBuffers() {
@@ -773,19 +1023,25 @@ private:
         scissor.extent = swapChainExtent;
         vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
-        // 在渲染管线中绑定顶点缓冲
         VkBuffer vertexBuffers[] = { vertexBuffer };
         VkDeviceSize offsets[] = { 0 };
-        // 第二和第三个参数用于指定偏移值和要绑定的顶点缓冲的数量，后两个参数用于指定需要绑定的顶点缓冲数组以及顶点数据在顶点缓冲中的偏移值数组
         vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
 
-        vkCmdDraw(commandBuffer, static_cast<uint32_t>(vertices.size()), 1, 0, 0); // 传递缓冲中的顶点数，而不是硬编码的数字 3
+        vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT16);
+
+        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descriptorSets[currentFrame], 0, nullptr);
+
+        for (uint32_t i = 0; i < MAX_OBJECTS; i++) { // per-object drawcall
+            vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 1, 1, &descriptorSetsPerObject[i + currentFrame * MAX_OBJECTS], 0, nullptr);
+            vkCmdDrawIndexed(commandBuffer, static_cast<uint32_t>(indices.size()), 1, 0, 0, 0);
+        }
 
         vkCmdEndRenderPass(commandBuffer);
 
         if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
             throw std::runtime_error("failed to record command buffer!");
         }
+
     }
 
     void createSyncObjects() {
@@ -809,6 +1065,40 @@ private:
         }
     }
 
+    void updateUniformBufferPerFrame(uint32_t currentImage) {
+        static auto startTime = std::chrono::high_resolution_clock::now();
+
+        auto currentTime = std::chrono::high_resolution_clock::now();
+        float time = std::chrono::duration<float, std::chrono::seconds::period>(currentTime - startTime).count();
+
+        UniformBufferObject1 ubo{};
+        ubo.view = glm::lookAt(glm::vec3(2.0f, 2.0f, 2.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+        ubo.proj = glm::perspective(glm::radians(45.0f), swapChainExtent.width / (float)swapChainExtent.height, 0.1f, 10.0f);
+        ubo.proj[1][1] *= -1;
+
+        memcpy(uniformBuffersMapped[currentImage], &ubo, sizeof(ubo));
+    }
+
+    void updateUniformBufferPerObject(uint32_t currentImage, uint32_t objectIndex) {
+        static auto startTime = std::chrono::high_resolution_clock::now();
+
+        auto currentTime = std::chrono::high_resolution_clock::now();
+        float time = std::chrono::duration<float, std::chrono::seconds::period>(currentTime - startTime).count();
+
+        UniformBufferObject2 ubo{};
+
+        glm::mat4 translation = glm::mat4(1.0f);
+        if (objectIndex == 0) // 把物体左右分开
+            translation = glm::translate(translation, glm::vec3(-1.0f, 0.0f, 0.0f));
+        else
+            translation = glm::translate(translation, glm::vec3(1.0f, 0.0f, 0.0f));
+        ubo.model = translation * glm::rotate(glm::mat4(1.0f), time * glm::radians(90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+
+        size_t bufferIndex = objectIndex + currentImage * MAX_OBJECTS; // 更新到对应的 uniform buffer
+
+        memcpy(uniformBuffersMappedPerObject[bufferIndex], &ubo, sizeof(ubo));
+    }
+
     void drawFrame() {
         vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
 
@@ -821,6 +1111,12 @@ private:
         }
         else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
             throw std::runtime_error("failed to acquire swap chain image!");
+        }
+
+        updateUniformBufferPerFrame(currentFrame);
+
+        for (size_t i = 0; i < MAX_OBJECTS; i++) { // 逐对象的 uniform buffer 更新
+            updateUniformBufferPerObject(currentFrame, i);
         }
 
         vkResetFences(device, 1, &inFlightFences[currentFrame]);

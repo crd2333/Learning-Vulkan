@@ -1,4 +1,4 @@
-#define GLFW_INCLUDE_VULKAN
+﻿#define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
 #include <iostream>
@@ -83,6 +83,7 @@ public:
     }
 
 private:
+    // 各种存储的对象，要么是需要在各个函数间传递、需要反复使用的，要么是需要最后在 cleanup 中清理的。不一一列举
     GLFWwindow* window;
 
     VkInstance instance;
@@ -146,7 +147,7 @@ private:
         }
 
         // drawFrame 中的所有操作都是异步的，当我们退出 mainLoop 时，可能 GPU 仍在执行绘制和呈现操作，这种情况下清理资源会导致验证层报错
-        // 解决方法是在销毁窗口之前等待逻辑设备完成操作
+        // 解决方法是在销毁窗口之前等待逻辑设备完成操作，这同时也是等待上一次提交的指令结束再提交下一帧指令（从而避免 CPU 不断提交超出 GPU 速度）
         // 还可以使用 vkQueueWaitIdle 更细粒度地等待特定命令队列中的操作完成。这些函数可以用作执行同步的一种非常基本的方法
         vkDeviceWaitIdle(device);
     }
@@ -186,6 +187,7 @@ private:
         glfwTerminate();
     }
 
+    // 创建 Vulkan 实例
     void createInstance() {
         if (enableValidationLayers && !checkValidationLayerSupport()) {
             throw std::runtime_error("validation layers requested, but not available!");
@@ -233,6 +235,7 @@ private:
         createInfo.pfnUserCallback = debugCallback;
     }
 
+    // 创建 debug messenger，用于在发生错误时输出调试信息
     void setupDebugMessenger() {
         if (!enableValidationLayers) return;
 
@@ -244,12 +247,14 @@ private:
         }
     }
 
+    // 窗口系统使用与平台无关，但其创建需要平台信息，通过全权交由 glfw 负责，这里调一个函数即可
     void createSurface() {
         if (glfwCreateWindowSurface(instance, window, nullptr, &surface) != VK_SUCCESS) {
             throw std::runtime_error("failed to create window surface!");
         }
     }
 
+    // 选择一个合适的物理设备，通过 isDeviceSuitable 函数来判断
     void pickPhysicalDevice() {
         uint32_t deviceCount = 0;
         vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr);
@@ -273,9 +278,12 @@ private:
         }
     }
 
+    // 创建逻辑设备（物理设备的抽象与功能子集）
+    // 涉及到 队列族、设备特性、扩展和验证层，但不涉及 instance
     void createLogicalDevice() {
         QueueFamilyIndices indices = findQueueFamilies(physicalDevice);
 
+        // 从队列族里面取队列
         std::vector<VkDeviceQueueCreateInfo> queueCreateInfos;
         std::set<uint32_t> uniqueQueueFamilies = {indices.graphicsFamily.value(), indices.presentFamily.value()};
 
@@ -289,19 +297,22 @@ private:
             queueCreateInfos.push_back(queueCreateInfo);
         }
 
+        // 设备特性
         VkPhysicalDeviceFeatures deviceFeatures{};
 
         VkDeviceCreateInfo createInfo{};
         createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
 
-        createInfo.queueCreateInfoCount = static_cast<uint32_t>(queueCreateInfos.size());
+        createInfo.queueCreateInfoCount = static_cast<uint32_t>(queueCreateInfos.size()); // 传入队列族信息
         createInfo.pQueueCreateInfos = queueCreateInfos.data();
 
-        createInfo.pEnabledFeatures = &deviceFeatures;
+        createInfo.pEnabledFeatures = &deviceFeatures; // 传入设备特性
 
+        // 扩展
         createInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
         createInfo.ppEnabledExtensionNames = deviceExtensions.data();
 
+        // 验证层
         if (enableValidationLayers) {
             createInfo.enabledLayerCount = static_cast<uint32_t>(validationLayers.size());
             createInfo.ppEnabledLayerNames = validationLayers.data();
@@ -313,17 +324,21 @@ private:
             throw std::runtime_error("failed to create logical device!");
         }
 
+        // 保存逻辑设备的队列句柄用于后续交互
         vkGetDeviceQueue(device, indices.graphicsFamily.value(), 0, &graphicsQueue);
         vkGetDeviceQueue(device, indices.presentFamily.value(), 0, &presentQueue);
     }
 
+    // 创建交换链（等待呈现到屏幕的图像队列，是一个包含帧缓冲区的基础设施），在扩展中启用、创建
     void createSwapChain() {
         SwapChainSupportDetails swapChainSupport = querySwapChainSupport(physicalDevice);
 
+        // 查询并挑选最佳设置
         VkSurfaceFormatKHR surfaceFormat = chooseSwapSurfaceFormat(swapChainSupport.formats);
         VkPresentModeKHR presentMode = chooseSwapPresentMode(swapChainSupport.presentModes);
         VkExtent2D extent = chooseSwapExtent(swapChainSupport.capabilities);
 
+        // 希望在交换链中拥有的图像，一般建议多请求一个，得到 2 / 3 个用于 Double / Triple Buffering
         uint32_t imageCount = swapChainSupport.capabilities.minImageCount + 1;
         if (swapChainSupport.capabilities.maxImageCount > 0 && imageCount > swapChainSupport.capabilities.maxImageCount) {
             imageCount = swapChainSupport.capabilities.maxImageCount;
@@ -343,6 +358,7 @@ private:
         QueueFamilyIndices indices = findQueueFamilies(physicalDevice);
         uint32_t queueFamilyIndices[] = {indices.graphicsFamily.value(), indices.presentFamily.value()};
 
+        // 如何处理将在多个队列族中使用的交换链图像
         if (indices.graphicsFamily != indices.presentFamily) {
             createInfo.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
             createInfo.queueFamilyIndexCount = 2;
@@ -370,6 +386,7 @@ private:
         swapChainExtent = extent;
     }
 
+    // image / texture 本质就是一段内存 (one dim buffer)，具体如何解释由 ImageView 决定
     void createImageViews() {
         swapChainImageViews.resize(swapChainImages.size());
 
@@ -449,6 +466,8 @@ private:
         }
     }
 
+    // 图形渲染管线，里面要指定一大堆东西，不细展开
+    // 可以参见 09_shader_modules.cpp / 10_fixed_functions.cpp / 12_graphics_pipeline_complete.cpp
     void createGraphicsPipeline() {
         auto vertShaderCode = readFile(CHAPTER_NAME "/shaders/vert.spv");
         auto fragShaderCode = readFile(CHAPTER_NAME "/shaders/frag.spv");
@@ -557,6 +576,7 @@ private:
         vkDestroyShaderModule(device, vertShaderModule, nullptr);
     }
 
+    // 为 swapChain 中的每个图像创建 framebuffer
     void createFramebuffers() {
         swapChainFramebuffers.resize(swapChainImageViews.size());
 
@@ -580,6 +600,7 @@ private:
         }
     }
 
+    // 创建 CommandBuffer 还是比较费的，创建一个 CommandPool 从中分配
     void createCommandPool() {
         QueueFamilyIndices queueFamilyIndices = findQueueFamilies(physicalDevice);
 
@@ -593,6 +614,7 @@ private:
         }
     }
 
+    // 创建 CommandBuffer，用于记录命令然后一并提交到 GPU（提交到队列）
     void createCommandBuffer() {
         VkCommandBufferAllocateInfo allocInfo{};
         allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
@@ -605,6 +627,7 @@ private:
         }
     }
 
+    // 将我们想要执行的命令写入 Command Buffer，作为参数传入并带上想要写入的当前交换链图像的索引
     void recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex) {
         VkCommandBufferBeginInfo beginInfo{};
         beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -613,6 +636,7 @@ private:
             throw std::runtime_error("failed to begin recording command buffer!");
         }
 
+        // RenderPass 是我们唯一的 SubPass
         VkRenderPassBeginInfo renderPassInfo{};
         renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
         renderPassInfo.renderPass = renderPass;
@@ -620,14 +644,18 @@ private:
         renderPassInfo.renderArea.offset = {0, 0};
         renderPassInfo.renderArea.extent = swapChainExtent;
 
+        // 清除颜色附件的值
         VkClearValue clearColor = {{{0.0f, 0.0f, 0.0f, 1.0f}}};
         renderPassInfo.clearValueCount = 1;
         renderPassInfo.pClearValues = &clearColor;
 
+        // 开始 SubPass (RenderPass) 的记录
         vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
 
+        // 绑定图形管线
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
 
+        // 为动态状态设置视口和裁剪区域
         VkViewport viewport{};
         viewport.x = 0.0f;
         viewport.y = 0.0f;
@@ -642,8 +670,10 @@ private:
         scissor.extent = swapChainExtent;
         vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
+        // 核心的绘制命令
         vkCmdDraw(commandBuffer, 3, 1, 0, 0);
 
+        // 结束 SubPass (RenderPass) 的记录
         vkCmdEndRenderPass(commandBuffer);
 
         if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
@@ -693,12 +723,12 @@ private:
         // vkQueueSubmit(work: A, fence : F) // enqueue A, start work immediately, signal F when done
         // vkWaitForFence(F) // blocks execution until A has finished executing
         // save_screenshot_to_disk() // can't run until the transfer has finished
-        // 一般来说，信号量用于指定 GPU 上操作的执行顺序，而围栏用于保持 CPU 和 GPU 彼此同步
+        // 一般来说，semaphore 用于指定 GPU 上操作的执行顺序，而 fence 用于保持 CPU 和 GPU 彼此同步
         // 有两个地方需要同步，交换链操作和等待上一帧完成。显然前者发生在 GPU 上，使用 Semaphore，后者需要主机等待（不一次绘制多个帧），使用 Fence
 
         // drawFrame() 的第一步就是等待上一帧完成（从而避免一次绘制多个帧）
         vkWaitForFences(device, 1, &inFlightFence, VK_TRUE, UINT64_MAX); // 此函数还具有超时参数，设为 UINT64_MAX 实际上禁用了超时
-        vkResetFences(device, 1, &inFlightFence); // 等待所有围栏发出信号后返回，然后重置为未发信号状态
+        vkResetFences(device, 1, &inFlightFence); // 等待所有 fence 发出信号后返回，然后重置为未发信号状态
 
         // 从交换链获取图像（回忆交换链是一项扩展功能，需要使用 vk***KHR 命名约定的函数，KHR 是 Khronos Group 的简写）
         uint32_t imageIndex;
@@ -762,6 +792,7 @@ private:
         // 现在终于可以绘制一个三角形啦！！！
     }
 
+    // 辅助函数，将字节数组封装为 Vulkan 着色器模块
     VkShaderModule createShaderModule(const std::vector<char>& code) {
         VkShaderModuleCreateInfo createInfo{};
         createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
@@ -776,6 +807,7 @@ private:
         return shaderModule;
     }
 
+    // 三个 choose 函数用于挑选最佳的设置（表面格式、呈现模式、交换链分辨率）
     VkSurfaceFormatKHR chooseSwapSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& availableFormats) {
         for (const auto& availableFormat : availableFormats) {
             if (availableFormat.format == VK_FORMAT_B8G8R8A8_SRGB && availableFormat.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
@@ -785,7 +817,6 @@ private:
 
         return availableFormats[0];
     }
-
     VkPresentModeKHR chooseSwapPresentMode(const std::vector<VkPresentModeKHR>& availablePresentModes) {
         for (const auto& availablePresentMode : availablePresentModes) {
             if (availablePresentMode == VK_PRESENT_MODE_MAILBOX_KHR) {
@@ -795,7 +826,6 @@ private:
 
         return VK_PRESENT_MODE_FIFO_KHR;
     }
-
     VkExtent2D chooseSwapExtent(const VkSurfaceCapabilitiesKHR& capabilities) {
         if (capabilities.currentExtent.width != std::numeric_limits<uint32_t>::max()) {
             return capabilities.currentExtent;
@@ -815,6 +845,7 @@ private:
         }
     }
 
+    // 查询 device，填充 SwapChainSupportDetails 结构体，用于判断 isDeviceSuitable 以及创建交换链
     SwapChainSupportDetails querySwapChainSupport(VkPhysicalDevice device) {
         SwapChainSupportDetails details;
 
@@ -839,6 +870,7 @@ private:
         return details;
     }
 
+    // 通过 队列族。扩展支持、交换链支持 确定物理设备是否适合
     bool isDeviceSuitable(VkPhysicalDevice device) {
         QueueFamilyIndices indices = findQueueFamilies(device);
 
@@ -853,6 +885,7 @@ private:
         return indices.isComplete() && extensionsSupported && swapChainAdequate;
     }
 
+    // 检查物理设备的扩展支持性，给 isDeviceSuitable 调用
     bool checkDeviceExtensionSupport(VkPhysicalDevice device) {
         uint32_t extensionCount;
         vkEnumerateDeviceExtensionProperties(device, nullptr, &extensionCount, nullptr);
@@ -869,6 +902,7 @@ private:
         return requiredExtensions.empty();
     }
 
+    // 通过查询物理设备的队列族属性来查找图形和呈现队列族
     QueueFamilyIndices findQueueFamilies(VkPhysicalDevice device) {
         QueueFamilyIndices indices;
 
@@ -901,6 +935,9 @@ private:
         return indices;
     }
 
+    // 获取需要的扩展
+    // 但感觉命名不是很严谨，这里只是 glfw 需要的扩展、启用验证层需要加个 debug_utils 扩展
+    // 其它需要的扩展都在各自地方处理了，比如物理设备扩展、交换链扩展……
     std::vector<const char*> getRequiredExtensions() {
         uint32_t glfwExtensionCount = 0;
         const char** glfwExtensions;
@@ -915,6 +952,7 @@ private:
         return extensions;
     }
 
+    // 检查验证层是否可用
     bool checkValidationLayerSupport() {
         uint32_t layerCount;
         vkEnumerateInstanceLayerProperties(&layerCount, nullptr);
@@ -940,6 +978,7 @@ private:
         return true;
     }
 
+    // 读取文件内容 (shader)
     static std::vector<char> readFile(const std::string& filename) {
         std::ifstream file(filename, std::ios::ate | std::ios::binary);
 
@@ -958,12 +997,14 @@ private:
         return buffer;
     }
 
+    // 错误回调函数，用 Vulkan 的宏定义
     static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity, VkDebugUtilsMessageTypeFlagsEXT messageType, const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData, void* pUserData) {
         std::cerr << "validation layer: " << pCallbackData->pMessage << std::endl;
 
         return VK_FALSE;
     }
 };
+
 
 int main() {
     HelloTriangleApplication app;

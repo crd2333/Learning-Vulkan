@@ -1,7 +1,8 @@
-#define GLFW_INCLUDE_VULKAN
+﻿#define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
 #define GLM_FORCE_RADIANS
+// #define GLM_FORCE_DEFAULT_ALIGNED_GENTYPES
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -18,6 +19,8 @@
 #include <array>
 #include <optional>
 #include <set>
+
+// 描述符池和集合的定义在前一章中已描述（我其实不是很懂 vulkan tutorial 为什么要把这两个分开为两章。。。）
 
 const uint32_t WIDTH = 800;
 const uint32_t HEIGHT = 600;
@@ -99,6 +102,30 @@ struct Vertex {
     }
 };
 
+// 跟 OpenGL 一样，Vulkan 希望结构中数据以特定方式在内存中对齐
+// 1. 标量必须按 N 对齐（= 4 字节，给定 32 位浮点数）
+// 2. vec2 必须按 2N 对齐（ = 8 字节）
+// 3. vec3 或 vec4 必须按 4N 对齐（ = 16 字节）
+// 4. 嵌套结构必须按其成员的基本对齐方式对齐，向上舍入到 16 的倍数
+// 5. mat4 矩阵必须与 vec4 具有相同的对齐方式
+
+// 例如，下面这个结构体如果没有 alignas(16) 这句话，偏移量分别为 0, 8, 72, 136，后面三个均不是 16 的倍数
+// struct UniformBufferObject {
+//     glm::vec2 foo;
+//     alignas(16) glm::mat4 model;
+//     glm::mat4 view;
+//     glm::mat4 proj;
+// };
+// 在 #include <glm/glm.hpp> 之前加上 #define GLM_FORCE_DEFAULT_ALIGNED_GENTYPES 也可以解决这个问题，但对嵌套结构可能不适用
+// struct Foo {
+//     glm::vec2 v;
+// };
+// struct UniformBufferObject {
+//     Foo f1;
+//     Foo f2;
+// };
+// 综上，始终明确对齐方式是一个比较好的实践
+
 struct UniformBufferObject {
     alignas(16) glm::mat4 model;
     alignas(16) glm::mat4 view;
@@ -161,8 +188,8 @@ private:
     std::vector<VkDeviceMemory> uniformBuffersMemory;
     std::vector<void*> uniformBuffersMapped;
 
-    VkDescriptorPool descriptorPool;
-    std::vector<VkDescriptorSet> descriptorSets;
+    VkDescriptorPool descriptorPool; // 记录描述符池的句柄
+    std::vector<VkDescriptorSet> descriptorSets; // 记录描述符集的句柄，它们不需要显式清理（会在描述符池销毁时自动释放）
 
     std::vector<VkCommandBuffer> commandBuffers;
 
@@ -204,8 +231,8 @@ private:
         createVertexBuffer();
         createIndexBuffer();
         createUniformBuffers();
-        createDescriptorPool();
-        createDescriptorSets();
+        createDescriptorPool(); // 创建描述符池
+        createDescriptorSets(); // 创建描述符集
         createCommandBuffers();
         createSyncObjects();
     }
@@ -560,7 +587,8 @@ private:
     }
 
     void createGraphicsPipeline() {
-        auto vertShaderCode = readFile(CHAPTER_NAME "/shaders/vert.spv");         auto fragShaderCode = readFile(CHAPTER_NAME "/shaders/frag.spv");
+        auto vertShaderCode = readFile(CHAPTER_NAME "/shaders/vert.spv");
+        auto fragShaderCode = readFile(CHAPTER_NAME "/shaders/frag.spv");
 
         VkShaderModule vertShaderModule = createShaderModule(vertShaderCode);
         VkShaderModule fragShaderModule = createShaderModule(fragShaderCode);
@@ -606,8 +634,8 @@ private:
         rasterizer.rasterizerDiscardEnable = VK_FALSE;
         rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
         rasterizer.lineWidth = 1.0f;
-        rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
-        rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;            // 投影矩阵中所做的 Y 翻转会导致顶点以逆时针而不是顺时针顺序绘制
+        rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE; // 我们改一下正背面的逻辑
         rasterizer.depthBiasEnable = VK_FALSE;
 
         VkPipelineMultisampleStateCreateInfo multisampling{};
@@ -763,15 +791,19 @@ private:
     }
 
     void createDescriptorPool() {
+        // 描述我们的描述符集合将包含哪些描述符类型以及每种类型的数量
         VkDescriptorPoolSize poolSize{};
         poolSize.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        // 我们为 in-flight 的每一帧分配描述符，池子的 descriptor capacity 必须大于等于 descriptor set 的数量乘以每个 set 使用的 descriptor 数量
         poolSize.descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
 
         VkDescriptorPoolCreateInfo poolInfo{};
         poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         poolInfo.poolSizeCount = 1;
         poolInfo.pPoolSizes = &poolSize;
-        poolInfo.maxSets = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
+        poolInfo.maxSets = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT); // 可能分配的描述符集的最大数量
+        // poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT // Optional，VkDescriptorPoolCreateFlags
+        // 这个 bit 用于确定是否可以释放单个描述符集，我们创建后不会再对其操作，因此不需要这个标志
 
         if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool) != VK_SUCCESS) {
             throw std::runtime_error("failed to create descriptor pool!");
@@ -779,33 +811,40 @@ private:
     }
 
     void createDescriptorSets() {
+        // 我们为 in-flight 的每一帧分配一个描述符集，每个集合有相同的布局（这个副本是需要的，因为 pSetLayouts 期望一个与集合数量匹配的数组）
         std::vector<VkDescriptorSetLayout> layouts(MAX_FRAMES_IN_FLIGHT, descriptorSetLayout);
         VkDescriptorSetAllocateInfo allocInfo{};
         allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-        allocInfo.descriptorPool = descriptorPool;
-        allocInfo.descriptorSetCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
+        allocInfo.descriptorPool = descriptorPool;                                  // 指定描述符池
+        allocInfo.descriptorSetCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT); // 创建多少个描述符集
         allocInfo.pSetLayouts = layouts.data();
 
+        // 分配描述符集合，每个集合都有一个 uniform buffer 描述符
         descriptorSets.resize(MAX_FRAMES_IN_FLIGHT);
         if (vkAllocateDescriptorSets(device, &allocInfo, descriptorSets.data()) != VK_SUCCESS) {
             throw std::runtime_error("failed to allocate descriptor sets!");
         }
 
+        // 分配描述符集后，需要配置其中的描述符，添加一个循环来填充每个描述符
         for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
             VkDescriptorBufferInfo bufferInfo{};
-            bufferInfo.buffer = uniformBuffers[i];
+            bufferInfo.buffer = uniformBuffers[i]; // 引用缓冲区的描述符
+                                                   // 实际上，多个描述符可以指向同一个缓冲区，然后归属于不同的描述符集，再绑定到同一个管线布局上，以此实现逐对象和全局的 UBO
             bufferInfo.offset = 0;
-            bufferInfo.range = sizeof(UniformBufferObject);
+            bufferInfo.range = sizeof(UniformBufferObject); // 也可以使用 VK_WHOLE_SIZE
 
             VkWriteDescriptorSet descriptorWrite{};
             descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            descriptorWrite.dstSet = descriptorSets[i];
-            descriptorWrite.dstBinding = 0;
-            descriptorWrite.dstArrayElement = 0;
-            descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-            descriptorWrite.descriptorCount = 1;
-            descriptorWrite.pBufferInfo = &bufferInfo;
+            descriptorWrite.dstSet = descriptorSets[i]; // 这个描述符归属于哪个描述符集
+            descriptorWrite.dstBinding = 0;             // 这个描述符在描述符集中的绑定位置
+            descriptorWrite.dstArrayElement = 0;        // 描述符可以是数组，这里指定是数组中的第一个索引（虽然我们没有使用数组）
+            descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; // 描述符类型
+            descriptorWrite.descriptorCount = 1;        // 指定从索引 dstArrayElement 开始要更新的数组元素的数量
+            descriptorWrite.pBufferInfo = &bufferInfo;  // 引用缓冲区数据的描述符
+            descriptorWrite.pImageInfo = nullptr;       // Optional，引用图像数据的描述符，我们用的不是图像
+            descriptorWrite.pTexelBufferView = nullptr; // Optional，引用缓冲区视图的描述符，我们用的不是缓冲区视图而只是单纯的缓冲区
 
+            // vkUpdateDescriptorSets 接受两种类型的数组作为参数：VkWriteDescriptorSet 数组和 VkCopyDescriptorSet 数组，后者可用于将描述符相互复制
             vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
         }
     }
@@ -917,38 +956,41 @@ private:
 
         vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
 
-            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
 
-            VkViewport viewport{};
-            viewport.x = 0.0f;
-            viewport.y = 0.0f;
-            viewport.width = (float) swapChainExtent.width;
-            viewport.height = (float) swapChainExtent.height;
-            viewport.minDepth = 0.0f;
-            viewport.maxDepth = 1.0f;
-            vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+        VkViewport viewport{};
+        viewport.x = 0.0f;
+        viewport.y = 0.0f;
+        viewport.width = (float) swapChainExtent.width;
+        viewport.height = (float) swapChainExtent.height;
+        viewport.minDepth = 0.0f;
+        viewport.maxDepth = 1.0f;
+        vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
 
-            VkRect2D scissor{};
-            scissor.offset = {0, 0};
-            scissor.extent = swapChainExtent;
-            vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+        VkRect2D scissor{};
+        scissor.offset = {0, 0};
+        scissor.extent = swapChainExtent;
+        vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
-            VkBuffer vertexBuffers[] = {vertexBuffer};
-            VkDeviceSize offsets[] = {0};
-            vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
+        VkBuffer vertexBuffers[] = {vertexBuffer};
+        VkDeviceSize offsets[] = {0};
+        vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
 
-            vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT16);
+        vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT16);
 
-            vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descriptorSets[currentFrame], 0, nullptr);
+        // 将每帧的正确描述符集合绑定到着色器中的描述符
+        // 描述符集合不是图形管线独有的，需要在第二个参数中指定是要将描述符集合绑定到图形管线还是计算管线
+        // 接下来的几个参数是描述符所基于的布局、第一个描述符集合的索引、要绑定的集合的数量、要绑定的集合数组、动态描述符的偏移量和数组（这个以后再介绍）
+        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descriptorSets[currentFrame], 0, nullptr);
 
-            vkCmdDrawIndexed(commandBuffer, static_cast<uint32_t>(indices.size()), 1, 0, 0, 0);
+        // 这需要在 vkCmdDrawIndexed 调用之前完成（绘制之前肯定得设置好吧，很好理解）
+        vkCmdDrawIndexed(commandBuffer, static_cast<uint32_t>(indices.size()), 1, 0, 0, 0);
 
         vkCmdEndRenderPass(commandBuffer);
 
         if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
             throw std::runtime_error("failed to record command buffer!");
         }
-
     }
 
     void createSyncObjects() {

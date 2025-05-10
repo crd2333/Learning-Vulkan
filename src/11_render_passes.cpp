@@ -1,4 +1,4 @@
-#define GLFW_INCLUDE_VULKAN
+﻿#define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
 #include <iostream>
@@ -401,7 +401,8 @@ private:
     }
 
     void createGraphicsPipeline() {
-        auto vertShaderCode = readFile(CHAPTER_NAME "/shaders/vert.spv");         auto fragShaderCode = readFile(CHAPTER_NAME "/shaders/frag.spv");
+        auto vertShaderCode = readFile(CHAPTER_NAME "/shaders/vert.spv");
+        auto fragShaderCode = readFile(CHAPTER_NAME "/shaders/frag.spv");
 
         VkShaderModule vertShaderModule = createShaderModule(vertShaderCode);
         VkShaderModule fragShaderModule = createShaderModule(fragShaderCode);

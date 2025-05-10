@@ -1,4 +1,4 @@
-#define GLFW_INCLUDE_VULKAN
+﻿#define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
 #include <glm/glm.hpp>
@@ -103,6 +103,7 @@ const std::vector<Vertex> vertices = {
     {{-0.5f, 0.5f}, {1.0f, 1.0f, 1.0f}}
 };
 
+// 索引数组，由于顶点数少于 65536，可以使用 uint16_t
 const std::vector<uint16_t> indices = {
     0, 1, 2, 2, 3, 0
 };
@@ -144,7 +145,7 @@ private:
 
     VkBuffer vertexBuffer;
     VkDeviceMemory vertexBufferMemory;
-    VkBuffer indexBuffer;
+    VkBuffer indexBuffer; // 为索引也定义 buffer 和 buffer memory
     VkDeviceMemory indexBufferMemory;
 
     std::vector<VkCommandBuffer> commandBuffers;
@@ -512,7 +513,8 @@ private:
     }
 
     void createGraphicsPipeline() {
-        auto vertShaderCode = readFile(CHAPTER_NAME "/shaders/vert.spv");         auto fragShaderCode = readFile(CHAPTER_NAME "/shaders/frag.spv");
+        auto vertShaderCode = readFile(CHAPTER_NAME "/shaders/vert.spv");
+        auto fragShaderCode = readFile(CHAPTER_NAME "/shaders/frag.spv");
 
         VkShaderModule vertShaderModule = createShaderModule(vertShaderCode);
         VkShaderModule fragShaderModule = createShaderModule(fragShaderCode);
@@ -680,6 +682,7 @@ private:
         vkFreeMemory(device, stagingBufferMemory, nullptr);
     }
 
+    // 创建索引缓冲，跟顶点缓冲基本一致
     void createIndexBuffer() {
         VkDeviceSize bufferSize = sizeof(indices[0]) * indices.size();
 
@@ -692,6 +695,9 @@ private:
             memcpy(data, indices.data(), (size_t) bufferSize);
         vkUnmapMemory(device, stagingBufferMemory);
 
+        // 使用 VK_BUFFER_USAGE_INDEX_BUFFER_BIT 而不是 VK_BUFFER_USAGE_VERTEX_BUFFER_BIT
+        // 前面提到过应该从单个内存分配中分配多个资源（缓冲区），更进一步，还应该将多个缓冲区 (vertex, index) 存储到单个 VkBuffer 中，用 offset 来区分
+        // 这样做的好处是对 cache 更友好，不过我们这里为清晰起见还是分开了
         createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, indexBuffer, indexBufferMemory);
 
         copyBuffer(stagingBuffer, indexBuffer, bufferSize);
@@ -807,29 +813,32 @@ private:
 
         vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
 
-            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
 
-            VkViewport viewport{};
-            viewport.x = 0.0f;
-            viewport.y = 0.0f;
-            viewport.width = (float) swapChainExtent.width;
-            viewport.height = (float) swapChainExtent.height;
-            viewport.minDepth = 0.0f;
-            viewport.maxDepth = 1.0f;
-            vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+        VkViewport viewport{};
+        viewport.x = 0.0f;
+        viewport.y = 0.0f;
+        viewport.width = (float) swapChainExtent.width;
+        viewport.height = (float) swapChainExtent.height;
+        viewport.minDepth = 0.0f;
+        viewport.maxDepth = 1.0f;
+        vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
 
-            VkRect2D scissor{};
-            scissor.offset = {0, 0};
-            scissor.extent = swapChainExtent;
-            vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+        VkRect2D scissor{};
+        scissor.offset = {0, 0};
+        scissor.extent = swapChainExtent;
+        vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
-            VkBuffer vertexBuffers[] = {vertexBuffer};
-            VkDeviceSize offsets[] = {0};
-            vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
+        // 在渲染管线中绑定顶点缓冲
+        VkBuffer vertexBuffers[] = {vertexBuffer};
+        VkDeviceSize offsets[] = {0};
+        vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
 
-            vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT16);
+        // 在渲染管线中绑定索引缓冲
+        vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT16);
 
-            vkCmdDrawIndexed(commandBuffer, static_cast<uint32_t>(indices.size()), 1, 0, 0, 0);
+        // 原本是 vkCmdDraw(commandBuffer, static_cast<uint32_t>(vertices.size()), 1, 0, 0); 现在改成：
+        vkCmdDrawIndexed(commandBuffer, static_cast<uint32_t>(indices.size()), 1, 0, 0, 0);
 
         vkCmdEndRenderPass(commandBuffer);
 

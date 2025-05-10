@@ -1,4 +1,4 @@
-#define GLFW_INCLUDE_VULKAN
+﻿#define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
 #include <iostream>
@@ -31,7 +31,7 @@ const bool enableValidationLayers = true;
 #endif
 
 VkResult CreateDebugUtilsMessengerEXT(VkInstance instance, const VkDebugUtilsMessengerCreateInfoEXT* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkDebugUtilsMessengerEXT* pDebugMessenger) {
-    auto func = (PFN_vkCreateDebugUtilsMessengerEXT) vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT");
+    auto func = (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT");
     if (func != nullptr) {
         return func(instance, pCreateInfo, pAllocator, pDebugMessenger);
     } else {
@@ -40,7 +40,7 @@ VkResult CreateDebugUtilsMessengerEXT(VkInstance instance, const VkDebugUtilsMes
 }
 
 void DestroyDebugUtilsMessengerEXT(VkInstance instance, VkDebugUtilsMessengerEXT debugMessenger, const VkAllocationCallbacks* pAllocator) {
-    auto func = (PFN_vkDestroyDebugUtilsMessengerEXT) vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT");
+    auto func = (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT");
     if (func != nullptr) {
         func(instance, debugMessenger, pAllocator);
     }
@@ -186,7 +186,7 @@ private:
             createInfo.ppEnabledLayerNames = validationLayers.data();
 
             populateDebugMessengerCreateInfo(debugCreateInfo);
-            createInfo.pNext = (VkDebugUtilsMessengerCreateInfoEXT*) &debugCreateInfo;
+            createInfo.pNext = (VkDebugUtilsMessengerCreateInfoEXT*)&debugCreateInfo;
         } else {
             createInfo.enabledLayerCount = 0;
 
@@ -250,7 +250,7 @@ private:
         QueueFamilyIndices indices = findQueueFamilies(physicalDevice);
 
         std::vector<VkDeviceQueueCreateInfo> queueCreateInfos;
-        std::set<uint32_t> uniqueQueueFamilies = {indices.graphicsFamily.value(), indices.presentFamily.value()};
+        std::set<uint32_t> uniqueQueueFamilies = { indices.graphicsFamily.value(), indices.presentFamily.value() };
 
         float queuePriority = 1.0f;
         for (uint32_t queueFamily : uniqueQueueFamilies) {
@@ -314,7 +314,7 @@ private:
         createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 
         QueueFamilyIndices indices = findQueueFamilies(physicalDevice);
-        uint32_t queueFamilyIndices[] = {indices.graphicsFamily.value(), indices.presentFamily.value()};
+        uint32_t queueFamilyIndices[] = { indices.graphicsFamily.value(), indices.presentFamily.value() };
 
         if (indices.graphicsFamily != indices.presentFamily) {
             createInfo.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
@@ -401,7 +401,8 @@ private:
     }
 
     void createGraphicsPipeline() {
-        auto vertShaderCode = readFile(CHAPTER_NAME "/shaders/vert.spv");         auto fragShaderCode = readFile(CHAPTER_NAME "/shaders/frag.spv");
+        auto vertShaderCode = readFile(CHAPTER_NAME "/shaders/vert.spv");
+        auto fragShaderCode = readFile(CHAPTER_NAME "/shaders/frag.spv");
 
         VkShaderModule vertShaderModule = createShaderModule(vertShaderCode);
         VkShaderModule fragShaderModule = createShaderModule(fragShaderCode);
@@ -418,7 +419,7 @@ private:
         fragShaderStageInfo.module = fragShaderModule;
         fragShaderStageInfo.pName = "main";
 
-        VkPipelineShaderStageCreateInfo shaderStages[] = {vertShaderStageInfo, fragShaderStageInfo};
+        VkPipelineShaderStageCreateInfo shaderStages[] = { vertShaderStageInfo, fragShaderStageInfo };
 
         VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
         vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
@@ -583,16 +584,16 @@ private:
         renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
         renderPassInfo.renderPass = renderPass; // 渲染通道本身
         renderPassInfo.framebuffer = swapChainFramebuffers[imageIndex]; // 要绑定的附件（为每个交换链图像创建的帧缓冲，被指定为颜色附件）
-        renderPassInfo.renderArea.offset = {0, 0};
+        renderPassInfo.renderArea.offset = { 0, 0 };
         renderPassInfo.renderArea.extent = swapChainExtent; // 为交换链图像选择的区域，区域之外的像素的值为 UB。应与附件的大小匹配以获得最佳性能
 
-        VkClearValue clearColor = {{{0.0f, 0.0f, 0.0f, 1.0f}}}; // 跟 OpenGL 一样的清除值
+        VkClearValue clearColor = { {{0.0f, 0.0f, 0.0f, 1.0f}} }; // 跟 OpenGL 一样的清除值
         renderPassInfo.clearValueCount = 1; // 可以有多个（为不同 attachment 分别指定）
         renderPassInfo.pClearValues = &clearColor;
 
         vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE); // 现在开始 RenderPass 的记录
         // 每个命令的第一个参数始终是要记录命令的 CommandBuffer；第二个则是刚刚提供的 Info；最后一个参数控制 SubPass 内的命令将如何提供可以是：
-        // 1. VK_SUBPASS_CONTENTS_INLINE：SubPass 命令将嵌入在 Primary Command Buffer 本身中，并且不会执行 Secondary Command Buffer 
+        // 1. VK_SUBPASS_CONTENTS_INLINE：SubPass 命令将嵌入在 Primary Command Buffer 本身中，并且不会执行 Secondary Command Buffer
         // 2. VK_SUBPASS_CONTENTS_SECONDARY_COMMAND_BUFFERS：SubPass 命令将从 Secondary Command Buffer 执行
         // 我们基本不用 Secondary，因此选第一个
         // 注：所有记录命令的函数都以 vkCmd 开头，都返回 void，因此不会有任何错误处理
@@ -603,14 +604,14 @@ private:
         VkViewport viewport{};
         viewport.x = 0.0f;
         viewport.y = 0.0f;
-        viewport.width = (float) swapChainExtent.width;
-        viewport.height = (float) swapChainExtent.height;
+        viewport.width = (float)swapChainExtent.width;
+        viewport.height = (float)swapChainExtent.height;
         viewport.minDepth = 0.0f;
         viewport.maxDepth = 1.0f;
         vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
 
         VkRect2D scissor{};
-        scissor.offset = {0, 0};
+        scissor.offset = { 0, 0 };
         scissor.extent = swapChainExtent;
         vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
@@ -812,7 +813,7 @@ private:
             throw std::runtime_error("failed to open file!");
         }
 
-        size_t fileSize = (size_t) file.tellg();
+        size_t fileSize = (size_t)file.tellg();
         std::vector<char> buffer(fileSize);
 
         file.seekg(0);
@@ -835,7 +836,8 @@ int main() {
 
     try {
         app.run();
-    } catch (const std::exception& e) {
+    }
+    catch (const std::exception& e) {
         std::cerr << e.what() << std::endl;
         return EXIT_FAILURE;
     }

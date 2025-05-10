@@ -1,4 +1,4 @@
-#define GLFW_INCLUDE_VULKAN
+﻿#define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
 #include <iostream>
@@ -78,7 +78,11 @@ private:
         createInstance();
         setupDebugMessenger();
         pickPhysicalDevice();
-        createLogicalDevice(); // 在上一节物理设备的基础上，设置一个逻辑设备与之交互（一个物理设备可以对应多个逻辑设备）
+        // 在上一节物理设备的基础上，设置一个逻辑设备与之交互（一个物理设备可以对应多个逻辑设备）
+        // 为什么要有多个逻辑设备？一般来说我们会为不同逻辑设备配置不同的队列族组合（例如一个只使用图形队列，一个只使用计算队列）
+        // 也就是说逻辑设备代表一个物理设备的功能子集，这样我们把图形功能和计算功能解耦开，进行独立的资源分配、调度和执行
+        // 不过，虽然 Vulkan 支持这种灵活性，但大多数应用程序可以只使用一个逻辑设备
+        createLogicalDevice();
     }
 
     void mainLoop() {

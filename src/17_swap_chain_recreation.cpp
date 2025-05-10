@@ -1,4 +1,4 @@
-#define GLFW_INCLUDE_VULKAN
+﻿#define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
 #include <iostream>
@@ -12,6 +12,8 @@
 #include <limits>
 #include <optional>
 #include <set>
+
+// 这一章我们将通过重建交换链来允许窗口大小调整
 
 const uint32_t WIDTH = 800;
 const uint32_t HEIGHT = 600;
@@ -33,16 +35,17 @@ const bool enableValidationLayers = true;
 #endif
 
 VkResult CreateDebugUtilsMessengerEXT(VkInstance instance, const VkDebugUtilsMessengerCreateInfoEXT* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkDebugUtilsMessengerEXT* pDebugMessenger) {
-    auto func = (PFN_vkCreateDebugUtilsMessengerEXT) vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT");
+    auto func = (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT");
     if (func != nullptr) {
         return func(instance, pCreateInfo, pAllocator, pDebugMessenger);
-    } else {
+    }
+    else {
         return VK_ERROR_EXTENSION_NOT_PRESENT;
     }
 }
 
 void DestroyDebugUtilsMessengerEXT(VkInstance instance, VkDebugUtilsMessengerEXT debugMessenger, const VkAllocationCallbacks* pAllocator) {
-    auto func = (PFN_vkDestroyDebugUtilsMessengerEXT) vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT");
+    auto func = (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT");
     if (func != nullptr) {
         func(instance, debugMessenger, pAllocator);
     }
@@ -104,6 +107,7 @@ private:
     std::vector<VkFence> inFlightFences;
     uint32_t currentFrame = 0;
 
+    // 许多驱动程序和平台在窗口大小调整后会自动触发 VK_ERROR_OUT_OF_DATE_KHR，但可能会有例外。我们添加一些额外代码来显式处理大小调整
     bool framebufferResized = false;
 
     void initWindow() {
@@ -112,12 +116,12 @@ private:
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
 
         window = glfwCreateWindow(WIDTH, HEIGHT, "Vulkan", nullptr, nullptr);
-        glfwSetWindowUserPointer(window, this);
-        glfwSetFramebufferSizeCallback(window, framebufferResizeCallback);
+        glfwSetWindowUserPointer(window, this); // glfw 函数允许我们在窗口中存储任意指针
+        glfwSetFramebufferSizeCallback(window, framebufferResizeCallback); // 设置回调函数
     }
 
     static void framebufferResizeCallback(GLFWwindow* window, int width, int height) {
-        auto app = reinterpret_cast<HelloTriangleApplication*>(glfwGetWindowUserPointer(window));
+        auto app = reinterpret_cast<HelloTriangleApplication*>(glfwGetWindowUserPointer(window)); // 从窗口中获得 App 的指针并设置窗口大小需要调整的逻辑
         app->framebufferResized = true;
     }
 
@@ -146,6 +150,7 @@ private:
         vkDeviceWaitIdle(device);
     }
 
+    // 把 swapChain 的清理逻辑单独封装成一个函数（因为 ReCreate SwapChain 也需要清理）
     void cleanupSwapChain() {
         for (auto framebuffer : swapChainFramebuffers) {
             vkDestroyFramebuffer(device, framebuffer, nullptr);
@@ -188,7 +193,9 @@ private:
         glfwTerminate();
     }
 
+    // 当 SurfaceWindow 发生变化（比如窗口大小改变），交换链不再与之兼容，我们必须捕获这些事件并重建交换链
     void recreateSwapChain() {
+        // 处理窗口最小化的情况，此时交换链过期，我们通过暂停直到窗口再次位于前台
         int width = 0, height = 0;
         glfwGetFramebufferSize(window, &width, &height);
         while (width == 0 || height == 0) {
@@ -196,10 +203,14 @@ private:
             glfwWaitEvents();
         }
 
-        vkDeviceWaitIdle(device);
+        vkDeviceWaitIdle(device); // 不应该触碰可能仍在使用的资源
+        // 我们使用的这种重建方法需要等待正在执行的所有设备操作结束才能进行
+        // 实际上是可以在渲染操作执行、原来交换链仍在使用时重建新的交换链的。在创建新的交换链时使用 VkSwapchainCreateInfoKHR 结构体的 oldSwapChain 成员变量引用原来的交换链即可
+        // 之后，在旧的交换链结束使用时就可以清除它
 
         cleanupSwapChain();
 
+        // 重新创建 SwapChain, ImageViews, FrameBuffers
         createSwapChain();
         createImageViews();
         createFramebuffers();
@@ -232,8 +243,9 @@ private:
             createInfo.ppEnabledLayerNames = validationLayers.data();
 
             populateDebugMessengerCreateInfo(debugCreateInfo);
-            createInfo.pNext = (VkDebugUtilsMessengerCreateInfoEXT*) &debugCreateInfo;
-        } else {
+            createInfo.pNext = (VkDebugUtilsMessengerCreateInfoEXT*)&debugCreateInfo;
+        }
+        else {
             createInfo.enabledLayerCount = 0;
 
             createInfo.pNext = nullptr;
@@ -296,7 +308,7 @@ private:
         QueueFamilyIndices indices = findQueueFamilies(physicalDevice);
 
         std::vector<VkDeviceQueueCreateInfo> queueCreateInfos;
-        std::set<uint32_t> uniqueQueueFamilies = {indices.graphicsFamily.value(), indices.presentFamily.value()};
+        std::set<uint32_t> uniqueQueueFamilies = { indices.graphicsFamily.value(), indices.presentFamily.value() };
 
         float queuePriority = 1.0f;
         for (uint32_t queueFamily : uniqueQueueFamilies) {
@@ -324,7 +336,8 @@ private:
         if (enableValidationLayers) {
             createInfo.enabledLayerCount = static_cast<uint32_t>(validationLayers.size());
             createInfo.ppEnabledLayerNames = validationLayers.data();
-        } else {
+        }
+        else {
             createInfo.enabledLayerCount = 0;
         }
 
@@ -360,13 +373,14 @@ private:
         createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 
         QueueFamilyIndices indices = findQueueFamilies(physicalDevice);
-        uint32_t queueFamilyIndices[] = {indices.graphicsFamily.value(), indices.presentFamily.value()};
+        uint32_t queueFamilyIndices[] = { indices.graphicsFamily.value(), indices.presentFamily.value() };
 
         if (indices.graphicsFamily != indices.presentFamily) {
             createInfo.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
             createInfo.queueFamilyIndexCount = 2;
             createInfo.pQueueFamilyIndices = queueFamilyIndices;
-        } else {
+        }
+        else {
             createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
         }
 
@@ -412,6 +426,8 @@ private:
         }
     }
 
+    // 理论上来说，RenderPass 也可能在应用程序生命周期内发生变化，比如把窗口从普通显示器移动到 HDR 显示器时
+    // 但为了简单起见我们不考虑这种情况，只考虑相对简单的窗口尺寸变化
     void createRenderPass() {
         VkAttachmentDescription colorAttachment{};
         colorAttachment.format = swapChainImageFormat;
@@ -455,7 +471,8 @@ private:
     }
 
     void createGraphicsPipeline() {
-        auto vertShaderCode = readFile(CHAPTER_NAME "/shaders/vert.spv");         auto fragShaderCode = readFile(CHAPTER_NAME "/shaders/frag.spv");
+        auto vertShaderCode = readFile(CHAPTER_NAME "/shaders/vert.spv");
+        auto fragShaderCode = readFile(CHAPTER_NAME "/shaders/frag.spv");
 
         VkShaderModule vertShaderModule = createShaderModule(vertShaderCode);
         VkShaderModule fragShaderModule = createShaderModule(fragShaderCode);
@@ -472,7 +489,7 @@ private:
         fragShaderStageInfo.module = fragShaderModule;
         fragShaderStageInfo.pName = "main";
 
-        VkPipelineShaderStageCreateInfo shaderStages[] = {vertShaderStageInfo, fragShaderStageInfo};
+        VkPipelineShaderStageCreateInfo shaderStages[] = { vertShaderStageInfo, fragShaderStageInfo };
 
         VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
         vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
@@ -604,7 +621,7 @@ private:
         allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
         allocInfo.commandPool = commandPool;
         allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        allocInfo.commandBufferCount = (uint32_t) commandBuffers.size();
+        allocInfo.commandBufferCount = (uint32_t)commandBuffers.size();
 
         if (vkAllocateCommandBuffers(device, &allocInfo, commandBuffers.data()) != VK_SUCCESS) {
             throw std::runtime_error("failed to allocate command buffers!");
@@ -623,32 +640,32 @@ private:
         renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
         renderPassInfo.renderPass = renderPass;
         renderPassInfo.framebuffer = swapChainFramebuffers[imageIndex];
-        renderPassInfo.renderArea.offset = {0, 0};
+        renderPassInfo.renderArea.offset = { 0, 0 };
         renderPassInfo.renderArea.extent = swapChainExtent;
 
-        VkClearValue clearColor = {{{0.0f, 0.0f, 0.0f, 1.0f}}};
+        VkClearValue clearColor = { {{0.0f, 0.0f, 0.0f, 1.0f}} };
         renderPassInfo.clearValueCount = 1;
         renderPassInfo.pClearValues = &clearColor;
 
         vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
 
-            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
 
-            VkViewport viewport{};
-            viewport.x = 0.0f;
-            viewport.y = 0.0f;
-            viewport.width = (float) swapChainExtent.width;
-            viewport.height = (float) swapChainExtent.height;
-            viewport.minDepth = 0.0f;
-            viewport.maxDepth = 1.0f;
-            vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+        VkViewport viewport{};
+        viewport.x = 0.0f;
+        viewport.y = 0.0f;
+        viewport.width = (float)swapChainExtent.width;
+        viewport.height = (float)swapChainExtent.height;
+        viewport.minDepth = 0.0f;
+        viewport.maxDepth = 1.0f;
+        vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
 
-            VkRect2D scissor{};
-            scissor.offset = {0, 0};
-            scissor.extent = swapChainExtent;
-            vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+        VkRect2D scissor{};
+        scissor.offset = { 0, 0 };
+        scissor.extent = swapChainExtent;
+        vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
-            vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+        vkCmdDraw(commandBuffer, 3, 1, 0, 0);
 
         vkCmdEndRenderPass(commandBuffer);
 
@@ -684,13 +701,18 @@ private:
         uint32_t imageIndex;
         VkResult result = vkAcquireNextImageKHR(device, swapChain, UINT64_MAX, imageAvailableSemaphores[currentFrame], VK_NULL_HANDLE, &imageIndex);
 
+        // 之前我们直接调用 vkAcquireNextImageKHR，没有利用它的返回结果。现在可以通过它来确认交换链是否过期或次优
+        // VK_ERROR_OUT_OF_DATE_KHR：交换链已变得与表面不兼容，并且不能再用于渲染。通常在窗口大小调整后发生。
+        // VK_SUBOPTIMAL_KHR：交换链仍然可以成功呈现到表面，但表面属性不再完全匹配
         if (result == VK_ERROR_OUT_OF_DATE_KHR) {
-            recreateSwapChain();
+            recreateSwapChain(); // 如果过期，这就是我们要重建交换链的时机
             return;
-        } else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+        }
+        else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
             throw std::runtime_error("failed to acquire swap chain image!");
         }
 
+        // 延迟重置 fence（之前是放在 vkAcquireNextImageKHR 前面），避免重置后又重建交换链返回，没有实际提交任务来使用 fence
         vkResetFences(device, 1, &inFlightFences[currentFrame]);
 
         vkResetCommandBuffer(commandBuffers[currentFrame], /*VkCommandBufferResetFlagBits*/ 0);
@@ -699,8 +721,8 @@ private:
         VkSubmitInfo submitInfo{};
         submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 
-        VkSemaphore waitSemaphores[] = {imageAvailableSemaphores[currentFrame]};
-        VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+        VkSemaphore waitSemaphores[] = { imageAvailableSemaphores[currentFrame] };
+        VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
         submitInfo.waitSemaphoreCount = 1;
         submitInfo.pWaitSemaphores = waitSemaphores;
         submitInfo.pWaitDstStageMask = waitStages;
@@ -708,7 +730,7 @@ private:
         submitInfo.commandBufferCount = 1;
         submitInfo.pCommandBuffers = &commandBuffers[currentFrame];
 
-        VkSemaphore signalSemaphores[] = {renderFinishedSemaphores[currentFrame]};
+        VkSemaphore signalSemaphores[] = { renderFinishedSemaphores[currentFrame] };
         submitInfo.signalSemaphoreCount = 1;
         submitInfo.pSignalSemaphores = signalSemaphores;
 
@@ -722,7 +744,7 @@ private:
         presentInfo.waitSemaphoreCount = 1;
         presentInfo.pWaitSemaphores = signalSemaphores;
 
-        VkSwapchainKHR swapChains[] = {swapChain};
+        VkSwapchainKHR swapChains[] = { swapChain };
         presentInfo.swapchainCount = 1;
         presentInfo.pSwapchains = swapChains;
 
@@ -730,10 +752,13 @@ private:
 
         result = vkQueuePresentKHR(presentQueue, &presentInfo);
 
+        // vkQueuePresentKHR 也是同理，之前没有利用返回结果，现在可以用返回结果确认交换链是否过期或次优
+        // 也可以用我们自己显式设置的 framebufferResized 来检查
         if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || framebufferResized) {
             framebufferResized = false;
             recreateSwapChain();
-        } else if (result != VK_SUCCESS) {
+        }
+        else if (result != VK_SUCCESS) {
             throw std::runtime_error("failed to present swap chain image!");
         }
 
@@ -777,9 +802,10 @@ private:
     VkExtent2D chooseSwapExtent(const VkSurfaceCapabilitiesKHR& capabilities) {
         if (capabilities.currentExtent.width != std::numeric_limits<uint32_t>::max()) {
             return capabilities.currentExtent;
-        } else {
+        }
+        else {
             int width, height;
-            glfwGetFramebufferSize(window, &width, &height);
+            glfwGetFramebufferSize(window, &width, &height); // chooseSwapExtent 中有获取新窗口分辨率的逻辑
 
             VkExtent2D actualExtent = {
                 static_cast<uint32_t>(width),
@@ -925,7 +951,7 @@ private:
             throw std::runtime_error("failed to open file!");
         }
 
-        size_t fileSize = (size_t) file.tellg();
+        size_t fileSize = (size_t)file.tellg();
         std::vector<char> buffer(fileSize);
 
         file.seekg(0);
@@ -948,7 +974,8 @@ int main() {
 
     try {
         app.run();
-    } catch (const std::exception& e) {
+    }
+    catch (const std::exception& e) {
         std::cerr << e.what() << std::endl;
         return EXIT_FAILURE;
     }

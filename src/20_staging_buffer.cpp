@@ -1,4 +1,4 @@
-#define GLFW_INCLUDE_VULKAN
+﻿#define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
 #include <glm/glm.hpp>
@@ -501,7 +501,8 @@ private:
     }
 
     void createGraphicsPipeline() {
-        auto vertShaderCode = readFile(CHAPTER_NAME "/shaders/vert.spv");         auto fragShaderCode = readFile(CHAPTER_NAME "/shaders/frag.spv");
+        auto vertShaderCode = readFile(CHAPTER_NAME "/shaders/vert.spv");
+        auto fragShaderCode = readFile(CHAPTER_NAME "/shaders/frag.spv");
 
         VkShaderModule vertShaderModule = createShaderModule(vertShaderCode);
         VkShaderModule fragShaderModule = createShaderModule(fragShaderCode);
@@ -650,25 +651,42 @@ private:
     }
 
     void createVertexBuffer() {
+        // 上一章创建的顶点缓冲可以正常工作，但我们设置为允许从 CPU 访问它的内存类型可能不是最佳的，最佳设置应该具有 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT flag
+        // 在本章中，我们将创建两个顶点缓冲。一个位于 CPU 可访问内存中的暂存缓冲区，用于从顶点数组上传数据；以及位于设备本地内存中的最终的顶点缓冲区。使用缓冲区复制命令进行移动
+        // 缓冲区复制命令需要支持传输操作的队列族，这通过 VK_QUEUE_TRANSFER_BIT 指示。任何具有 VK_QUEUE_GRAPHICS_BIT 或 VK_QUEUE_COMPUTE_BIT 功能的队列族都已经隐式支持这一操作
+        // 本教程中不再额外检查它，但如果想要挑战，需要做如下修改
+        // 1. 修改 QueueFamilyIndices 和 findQueueFamilies 以显式查找具有 VK_QUEUE_TRANSFER_BIT 位，但没有 VK_QUEUE_GRAPHICS_BIT 的队列族。
+        // 2. 修改 createLogicalDevice 以请求传输队列的句柄
+        // 3. 为在传输队列族上提交的命令缓冲创建第二个命令池
+        // 4. 将资源的 sharingMode 更改为 VK_SHARING_MODE_CONCURRENT，并指定图形和传输队列族
+        // 5. 将任何传输命令（例如 vkCmdCopyBuffer，我们将在本章中使用它）提交到传输队列，而不是图形队列
+
         VkDeviceSize bufferSize = sizeof(vertices[0]) * vertices.size();
 
+        // 创建一个跟上一章类似的 buffer 作为暂存缓冲区（这只是一个本地变量）
+        // 除了 usage 从 VK_BUFFER_USAGE_VERTEX_BUFFER_BIT 变为 VK_BUFFER_USAGE_TRANSFER_SRC_BIT
         VkBuffer stagingBuffer;
         VkDeviceMemory stagingBufferMemory;
         createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
 
+        // 向其中填数据
         void* data;
         vkMapMemory(device, stagingBufferMemory, 0, bufferSize, 0, &data);
             memcpy(data, vertices.data(), (size_t) bufferSize);
         vkUnmapMemory(device, stagingBufferMemory);
 
+        // 创建 device_local 的 buffer
+        // usage 指定为 VK_BUFFER_USAGE_TRANSFER_DST_BIT 以及上一章的 VK_BUFFER_USAGE_VERTEX_BUFFER_BIT，properties 指定 device_local
         createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, vertexBuffer, vertexBufferMemory);
 
+        // vertexBuffer 现在从设备本地的内存类型分配，这通常意味着我们无法使用 vkMapMemory，但可以将数据从 stagingBuffer 复制到 vertexBuffer，为此编写一个函数
         copyBuffer(stagingBuffer, vertexBuffer, bufferSize);
 
-        vkDestroyBuffer(device, stagingBuffer, nullptr);
+        vkDestroyBuffer(device, stagingBuffer, nullptr); // 工具人 stagingBuffer 现在可以销毁了
         vkFreeMemory(device, stagingBufferMemory, nullptr);
     }
 
+    // 本章将创建多个缓冲，所以把上一章创建顶点缓冲的逻辑（除了映射）抽象为一个函数
     void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& bufferMemory) {
         VkBufferCreateInfo bufferInfo{};
         bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -688,6 +706,8 @@ private:
         allocInfo.allocationSize = memRequirements.size;
         allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, properties);
 
+        // 实际上，不应该为每个单独的 Buffer 调用 vkAllocateMemory，而应该创建一个自定义分配器，一次申请大块然后通过 offset 分配到许多对象中
+        // 本教程为简单起见没有这么做，或者也可以使用 VulkanMemoryAllocator 库
         if (vkAllocateMemory(device, &allocInfo, nullptr, &bufferMemory) != VK_SUCCESS) {
             throw std::runtime_error("failed to allocate buffer memory!");
         }
@@ -695,37 +715,45 @@ private:
         vkBindBufferMemory(device, buffer, bufferMemory, 0);
     }
 
+    // 将内容从一个缓冲复制到另一个缓冲
     void copyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size) {
+        // 内存传输操作使用 CommandBuffer 执行，就像绘制命令一样，因此分配一个临时 CommandBuffer
         VkCommandBufferAllocateInfo allocInfo{};
         allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
         allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        // 这里我们用的是之前的 CommandPool，实际上可以为这种短生命周期 CommandBuffer 专门创建一个 CommandPool
+        // 之前创建的时候是用 poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT，改为 VK_COMMAND_POOL_CREATE_TRANSIENT_BIT 会更好
         allocInfo.commandPool = commandPool;
         allocInfo.commandBufferCount = 1;
 
         VkCommandBuffer commandBuffer;
-        vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer);
+        vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer); // 分配临时的 CommandBuffer
 
+        // 立即开始记录命令缓冲
         VkCommandBufferBeginInfo beginInfo{};
         beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT; // 显式告诉 vulkan 只使用一次，并在复制操作完成执行后才从函数返回
 
         vkBeginCommandBuffer(commandBuffer, &beginInfo);
 
-            VkBufferCopy copyRegion{};
-            copyRegion.size = size;
-            vkCmdCopyBuffer(commandBuffer, srcBuffer, dstBuffer, 1, &copyRegion);
+        VkBufferCopy copyRegion{};
+        copyRegion.srcOffset = 0; // optional
+        copyRegion.dstOffset = 0; // optional
+        copyRegion.size = size;   // 与 vkMapMemory 命令不同，这里无法指定 VK_WHOLE_SIZE
+        vkCmdCopyBuffer(commandBuffer, srcBuffer, dstBuffer, 1, &copyRegion); // 核心的传输命令
 
-        vkEndCommandBuffer(commandBuffer);
+        vkEndCommandBuffer(commandBuffer); // 结束记录
 
+        // 然后直接上传到队列（之前的图形绘制是在 drawFrame 函数中提交至队列的）
         VkSubmitInfo submitInfo{};
         submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
         submitInfo.commandBufferCount = 1;
         submitInfo.pCommandBuffers = &commandBuffer;
 
         vkQueueSubmit(graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
-        vkQueueWaitIdle(graphicsQueue);
+        vkQueueWaitIdle(graphicsQueue); // 不用管任何同步，直接等待队列完成。同样，这是比较粗糙的做法，如果有多个传输，可以用 fence 和 vkWaitForFences 来做
 
-        vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
+        vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer); // 直接清理这个 CommandBuffer
     }
 
     uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {

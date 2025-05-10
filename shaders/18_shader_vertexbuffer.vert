@@ -1,5 +1,6 @@
 #version 450
 
+// 修改硬编码的顶点着色器，使用 in 关键字从顶点缓冲获取输入
 layout(location = 0) in vec2 inPosition;
 layout(location = 1) in vec3 inColor;
 

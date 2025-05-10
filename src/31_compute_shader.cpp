@@ -1,4 +1,4 @@
-// Sample by Sascha Willems
+﻿// Sample by Sascha Willems
 // Contact: webmaster@saschawillems.de
 
 #define GLFW_INCLUDE_VULKAN
@@ -589,7 +589,8 @@ private:
 
 
     void createGraphicsPipeline() {
-        auto vertShaderCode = readFile(CHAPTER_NAME "/shaders/vert.spv");         auto fragShaderCode = readFile(CHAPTER_NAME "/shaders/frag.spv");
+        auto vertShaderCode = readFile(CHAPTER_NAME "/shaders/vert.spv");
+        auto fragShaderCode = readFile(CHAPTER_NAME "/shaders/frag.spv");
 
         VkShaderModule vertShaderModule = createShaderModule(vertShaderCode);
         VkShaderModule fragShaderModule = createShaderModule(fragShaderCode);
@@ -708,7 +709,7 @@ private:
     }
 
     void createComputePipeline() {
-        auto computeShaderCode = readFile("shaders/comp.spv");
+        auto computeShaderCode = readFile(CHAPTER_NAME "/shaders/comp.spv");
 
         VkShaderModule computeShaderModule = createShaderModule(computeShaderCode);
 
