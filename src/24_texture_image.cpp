@@ -5,7 +5,7 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
-#define STB_IMAGE_IMPLEMENTATION
+#define STB_IMAGE_IMPLEMENTATION // 引入图像加载库及其实现
 #include <stb_image.h>
 
 #include <iostream>
@@ -21,6 +21,28 @@
 #include <array>
 #include <optional>
 #include <set>
+
+// 到目前为止我们都在用逐顶点颜色来着色，现在我们将逐步实现纹理映射，涉及以下步骤：
+// 1. 创建由设备内存支持的图像对象
+// 2. 用图像文件中的像素填充它
+// 3. 创建图像采样器
+// 4. 添加一个组合图像采样器描述符，以从纹理中采样颜色
+// 本章只涉及前两步
+
+// 我们之前已经使用过图像对象，但这些对象是由交换链扩展自动创建的，这次我们将不得不自己创建一个
+// 创建图像并用数据填充它类似于创建顶点缓冲区。我们将首先创建一个暂存资源 (staging) 并用像素数据填充它，然后将其复制到我们将用于渲染的最终图像对象
+// 这个暂存资源可以直接是一个图像，但 vulkan 允许我们从 VkBuffer 将像素复制到图像，这在某些硬件上会比直接图像复制更快。因此我们采用 buffer 的方式
+
+// 创建图像实际上与创建缓冲区没有太大区别，涉及查询内存需求、分配设备内存并绑定它
+// 但不同的地方在于，图像可以有不同的布局，影响像素在内存中的组织方式（简单地逐行存储可能无法获取最佳性能），有下面这些：
+// 1. VK_IMAGE_LAYOUT_PRESENT_SRC_KHR：最适合呈现
+// 2. VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL：最适合作为附件，用于从片段着色器写入颜色
+// 3. VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL：最适合作为传输操作的源，例如 vkCmdCopyImageToBuffer
+// 4. VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL：最适合作为传输操作的目的地，例如 vkCmdCopyBufferToImage
+// 5. VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL：最适合从着色器采样
+
+// 转换图像布局最常见的方法之一是使用管线屏障 pipeline barrier，通常用于同步资源访问（例如确保在读取前已经写入），但也可以用作布局转换
+// 当使用 VK_SHARING_MODE_EXCLUSIVE 时，pipeline barrier 还可以用于传输队列族所有权
 
 const uint32_t WIDTH = 800;
 const uint32_t HEIGHT = 600;
@@ -207,7 +229,7 @@ private:
         createGraphicsPipeline();
         createFramebuffers();
         createCommandPool();
-        createTextureImage();
+        createTextureImage(); // 在 CommandPool 之后调用
         createVertexBuffer();
         createIndexBuffer();
         createUniformBuffers();
@@ -252,6 +274,7 @@ private:
 
         vkDestroyDescriptorPool(device, descriptorPool, nullptr);
 
+        // 清理纹理图像
         vkDestroyImage(device, textureImage, nullptr);
         vkFreeMemory(device, textureImageMemory, nullptr);
 
@@ -719,56 +742,63 @@ private:
         }
     }
 
+    // 加载图像并将其上传到 Vulkan 图像对象中
     void createTextureImage() {
         int texWidth, texHeight, texChannels;
-        stbi_uc* pixels = stbi_load("textures/texture.jpg", &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
-        VkDeviceSize imageSize = texWidth * texHeight * 4;
+        stbi_uc* pixels = stbi_load(CHAPTER_NAME "/textures/texture.jpg", &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
+        VkDeviceSize imageSize = texWidth * texHeight * 4; // STBI_rgb_alpha 下每个像素 4 个字节
 
         if (!pixels) {
             throw std::runtime_error("failed to load texture image!");
         }
 
+        // staging buffer
         VkBuffer stagingBuffer;
         VkDeviceMemory stagingBufferMemory;
         createBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
 
         void* data;
         vkMapMemory(device, stagingBufferMemory, 0, imageSize, 0, &data);
-            memcpy(data, pixels, static_cast<size_t>(imageSize));
+        memcpy(data, pixels, static_cast<size_t>(imageSize));
         vkUnmapMemory(device, stagingBufferMemory);
 
-        stbi_image_free(pixels);
+        stbi_image_free(pixels); // 释放图像数据
 
-        createImage(texWidth, texHeight, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, textureImage, textureImageMemory);
+        createImage(texWidth, texHeight, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, textureImage, textureImageMemory);
 
         transitionImageLayout(textureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-            copyBufferToImage(stagingBuffer, textureImage, static_cast<uint32_t>(texWidth), static_cast<uint32_t>(texHeight));
-        transitionImageLayout(textureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        copyBufferToImage(stagingBuffer, textureImage, static_cast<uint32_t>(texWidth), static_cast<uint32_t>(texHeight));
+        transitionImageLayout(textureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL); // 再从传输布局转换为着色器可读布局
 
-        vkDestroyBuffer(device, stagingBuffer, nullptr);
+        vkDestroyBuffer(device, stagingBuffer, nullptr); // 释放工具人
         vkFreeMemory(device, stagingBufferMemory, nullptr);
     }
 
     void createImage(uint32_t width, uint32_t height, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage, VkMemoryPropertyFlags properties, VkImage& image, VkDeviceMemory& imageMemory) {
         VkImageCreateInfo imageInfo{};
         imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-        imageInfo.imageType = VK_IMAGE_TYPE_2D;
-        imageInfo.extent.width = width;
+        imageInfo.imageType = VK_IMAGE_TYPE_2D; // 纹素以哪种坐标系寻址 (1D, 2D, 3D)
+        imageInfo.extent.width = width;         // 图像的尺寸（每个轴有多少纹素）
         imageInfo.extent.height = height;
         imageInfo.extent.depth = 1;
-        imageInfo.mipLevels = 1;
-        imageInfo.arrayLayers = 1;
-        imageInfo.format = format;
-        imageInfo.tiling = tiling;
-        imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        imageInfo.usage = usage;
-        imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-        imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        imageInfo.mipLevels = 1;                // 暂时不使用 mipmap
+        imageInfo.arrayLayers = 1;              // 暂时不适用纹理数组
+        imageInfo.format = format;              // 格式，注意需要跟 buffer 的像素使用同样格式
+        imageInfo.tiling = tiling;              // VK_IMAGE_TILING_LINEAR 或 VK_IMAGE_TILING_OPTIMAL，分别是像 pixels 数组一样行优先排列，还是以具体实现定义的顺序排列
+        imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; // 两种可能值，我们从缓冲区对象将纹素数据复制到其中，可以安全地使用 undefined
+        // VK_IMAGE_LAYOUT_UNDEFINED：GPU 不可用，并且第一次转换将丢弃纹素（在被转换到第一个可用布局之前，里面的内容是未定义的，GPU 不会去使用它，转换时也可能丢弃它）
+        // VK_IMAGE_LAYOUT_PREINITIALIZED：GPU 不可用，但第一次转换将保留纹素（在被转换到第一个可用布局之前，里面的内容是有效的，一般由 CPU 提前填充，GPU 同样不能使用它，但在转换时会保留它，从而能在新布局下使用）
+        imageInfo.usage = usage;                // 用途，应与 buffer 的用途相对应（传输目的地），另外还得加上 VK_IMAGE_USAGE_SAMPLED_BIT 能够采样用于着色
+        imageInfo.samples = VK_SAMPLE_COUNT_1_BIT; // 与多重采样有关，仅与用作附件的图像相关
+        imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE; // 仅有一个队列族使用（支持图形以及因此而隐式支持传输操作的队列族）
+        // imageInfo.flags = 0;                 // Optional，一些与稀疏图像相关的图像可以用标志来压缩内存分配
 
         if (vkCreateImage(device, &imageInfo, nullptr, &image) != VK_SUCCESS) {
             throw std::runtime_error("failed to create image!");
-        }
+        } // VK_FORMAT_R8G8B8A8_SRGB 格式可能不受图形硬件支持，理论上来说这里应该有个替代方案列表，但这个支持已经非常广泛，且图像格式转换有点麻烦，这里就先略过了
 
+        // 为图像分配内存的工作方式与为缓冲区分配内存的方式几乎完全相同
         VkMemoryRequirements memRequirements;
         vkGetImageMemoryRequirements(device, image, &memRequirements);
 
@@ -784,72 +814,97 @@ private:
         vkBindImageMemory(device, image, imageMemory, 0);
     }
 
+    // vkCmdCopyBufferToImage 需要图像首先处于正确的布局中，创建一个新函数来处理布局转换
     void transitionImageLayout(VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout) {
         VkCommandBuffer commandBuffer = beginSingleTimeCommands();
 
+        // 使用图像内存屏障同步对资源的访问、转换图像布局（这里的用法）并在使用独占模式时传输队列族所有权，对于 Buffer 其实也有对应的 VkBufferMemoryBarrier
         VkImageMemoryBarrier barrier{};
         barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        barrier.oldLayout = oldLayout;
+        barrier.oldLayout = oldLayout;                         // 新旧 layout，如果不关心图像的现有内容，则可以使用 VK_IMAGE_LAYOUT_UNDEFINED 作为 oldLayout
         barrier.newLayout = newLayout;
-        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; // 设为队列族的索引来传输所有权，这里不想这么做则设为 ignored（必须！并非默认行为）
         barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.image = image;
+        barrier.image = image;                                 // 指定受影响的图像和图像的特定部分
         barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        barrier.subresourceRange.baseMipLevel = 0;
+        barrier.subresourceRange.baseMipLevel = 0;             // 我们的图像不是数组也没有 mipmap
         barrier.subresourceRange.levelCount = 1;
         barrier.subresourceRange.baseArrayLayer = 0;
         barrier.subresourceRange.layerCount = 1;
 
+        // 尽管我们已经在 endSingleTimeCommands 使用 vkQueueWaitIdle 来让整个转换过程立即执行从而达到同步，但依然需要确定屏障之前、之后有哪些涉及资源的操作类型必须发生或等待
+        // 允许的值在 https://www.khronos.org/registry/vulkan/specs/1.3-extensions/html/chap7.html#synchronization-access-types-supported 这个列表里
         VkPipelineStageFlags sourceStage;
         VkPipelineStageFlags destinationStage;
 
+        // 我们需要处理两个转换
         if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
-            barrier.srcAccessMask = 0;
-            barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-
-            sourceStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-            destinationStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+            // 1. 未定义 -> 传输目的地：这个图像布局转换不需要等待任何内容，它涉及到图像的传输写入
+            sourceStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;      // 可以为屏障前操作指定最早可能的管线阶段
+            barrier.srcAccessMask = 0;                            // 写入不必等待任何内容，因此可以为屏障前操作指定空掩码（一般 VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT 都会配合 AccessMask 作为 0 来使用）
+            // 另外，CommandBuffer 提交会导致开始时 srcAccessMask 有一个隐式的 VK_ACCESS_HOST_WRITE_BIT 同步，即使设为 0 也会生效。从 vulkan 显式化操作的实践来看，一般建议如果需要这个同步时显式加上这个 bit
+            destinationStage = VK_PIPELINE_STAGE_TRANSFER_BIT;    // 不是图形和计算管线中的真实阶段，类似于一个发生传输的伪阶段
+            barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; // 传输涉及到图像写入
         } else if (oldLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && newLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
-            barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-
-            sourceStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-            destinationStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+            // 2. 传输目的地 -> 着色器读取：图像将在同一管线阶段写入，随后由片段着色器读取（然后就能采样使用纹理），因此这个布局转换要求着色器读取等待传输写入
+            // 实际上我认为仅就这里而言，dst 的设置是多余的，因为整个 createTextureImage 的操作都在一个单独的 CommandBuffer 中完成，并在结束时直接 vkQueueWaitIdle 等待完成来达到同步，并不会涉及 fragment shader
+            // 这里这么写的原因在于保持良好的 vulkan 编程实践，以及在实际应用中我们往往会如 endSingleTimeCommands 处的注释所言，选择打包提交
+            sourceStage = VK_PIPELINE_STAGE_TRANSFER_BIT;         // （片段）着色器读取需要等待传输完成（需要完成好 copyBufferToImage）
+            barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; // 并且传输涉及到图像写入
+            destinationStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT; // 应等待 srcStage 的操作发生在片段着色器阶段
+                                                                      // 注意跟片段着色器前后的测试阶段区分 VK_PIPELINE_STAGE_<EARLY / LATE>_FRAGMENT_TESTS_BIT
+            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;        // 并且涉及到着色器读取
         } else {
             throw std::invalid_argument("unsupported layout transition!");
         }
+        // 实际上还有一种特殊的图像布局支持所有的操作 VK_IMAGE_LAYOUT_GENERAL，但不一定提供最佳性能。它在图像同时用作输入输出，或者在图像离开预初始化布局后（不再是 VK_IMAGE_LAYOUT_PREINITIALIZED 状态）读取图像时是有用的
+
+        // 另外提一嘴，有没有感觉这里的 srcAccessMask, dstAccessMask 有点熟悉？我们在 RenderPass 那边定义过一个叫 VkSubpassDependency 的东西，指定 SubPass 的依赖（即使单个 SubPass 也有隐含依赖）
+        // ------------------------------ 之前的代码及注释 ------------------------------
+        // VkSubpassDependency dependency{};
+        // dependency.srcSubpass = VK_SUBPASS_EXTERNAL; // 依赖之前的 SubPass 的索引，指定为 RenderPass 之前或之后的隐含的 SubPass
+        // dependency.dstSubpass = 0;                   // 依赖之后的 SubPass 的索引，指定为我们唯一创建的 subpass
+        //                                              // 为了避免出现循环依赖，给 dstSubpass 设置的值必须始终大于 srcSubpass（除非其中一个子通道是 VK_SUBPASS_EXTERNAL）
+        // // 指定要等待的操作以及这些操作发生的阶段，这样设置后，图像布局变换将不会发生，直到必要且允许时（即当我们想要开始写入颜色数据时，这时交换链图像肯定已经获取到）才会进行
+        // dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; // 通过等待颜色附件输出阶段来等待交换链完成从图像读取这一外部操作（也就不会在这之前进行图像布局转换），然后才能开始 dst stage 的操作访问它
+        // dependency.srcAccessMask = 0;                                            // 这代表不关心该阶段里的内存读写操作，只要 srcStage 执行完，dstStage 阻塞的操作就可以继续了（换句话说，没有 memory dependency）
+        // dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; // 应等待 srcStage 操作的操作（这里也就是我们的 index 0 SubPss，涉及 loadOp 和图像布局转换）位于颜色附件阶段
+        // dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;         // 并涉及颜色附件的写入（loadOp 包含写入）
+        // ------------------------------ 之前的代码及注释 ------------------------------
+        // dependency 处设置的东西跟上述 barrier 处设置的都是 VkPipelineStageFlagBits 以及 VkAccessFlagBits（只是前者没有被设置为 VkImageMemoryBarrier 的成员，但在下面创建 barrier 的时候依然要指定）
+        // 现在是否更能理解之前在 15_hello_triangle.cpp 处的这句注释了呢？“RenderPass 的 SubPass 会自动进行图像布局转换，由 SubPass 的依赖所决定，依赖包括 SubPass 之间内存和执行的依赖关系”
+        // 或者更本质地来说，VkSubpassDependency 跟 VkMemoryBarrier / VkBufferMemoryBarrier / VkImageMemoryBarrier 这些东西没有本质区别，只是作用域和使用位置的不同而已
 
         vkCmdPipelineBarrier(
             commandBuffer,
-            sourceStage, destinationStage,
-            0,
-            0, nullptr,
+            sourceStage, destinationStage, // source stage 必须发生在 barrier 之前，destinaiton stage 必须等待 barrier 完成
+            0, // 可以设置为 0 或 VK_DEPENDENCY_BY_REGION_BIT，后者使屏障就变成一个区域条件，允许我们读取资源目前已经写入的那部分
+            0, nullptr, // 后 6 个参数用于引用三种可用的管线屏障数组：内存屏障 memory barriers，缓冲内存屏障 buffer memory barriers 和图像内存屏障 image memory barriers
             0, nullptr,
             1, &barrier
         );
 
         endSingleTimeCommands(commandBuffer);
+        // 我们没有在这个函数中使用 VkFormat 函数，这是为以后留的接口（depth buffer 章节中将其用于特殊转换）
     }
 
+    // 像实现 copyBuffer 一样实现一个 copyBufferToImage
     void copyBufferToImage(VkBuffer buffer, VkImage image, uint32_t width, uint32_t height) {
         VkCommandBuffer commandBuffer = beginSingleTimeCommands();
 
+        // 指定 buffer 的哪一部分将复制到 image 的哪一部分
         VkBufferImageCopy region{};
         region.bufferOffset = 0;
-        region.bufferRowLength = 0;
+        region.bufferRowLength = 0;   // RowLength 和 ImageHeight 指定像素在内存中的布局方式，例如图像行之间可能有一些填充字节，都指定为 0 表示紧密堆积
         region.bufferImageHeight = 0;
         region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         region.imageSubresource.mipLevel = 0;
         region.imageSubresource.baseArrayLayer = 0;
         region.imageSubresource.layerCount = 1;
         region.imageOffset = {0, 0, 0};
-        region.imageExtent = {
-            width,
-            height,
-            1
-        };
+        region.imageExtent = {width, height, 1};
 
-        vkCmdCopyBufferToImage(commandBuffer, buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+        vkCmdCopyBufferToImage(commandBuffer, buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region); // 把图像转换为 最适合作为传输目标 的布局
 
         endSingleTimeCommands(commandBuffer);
     }
@@ -1011,12 +1066,14 @@ private:
 
         vkQueueSubmit(graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
         vkQueueWaitIdle(graphicsQueue);
+        // 到目前位置我们都借此来保证同步执行。在实际应用中建议将这些操作组合在一个 CommandBuffer 中并异步执行以获得更高吞吐量，尤其是 createTextureImage 中的转换和复制操作
+        // 可以尝试创建一个 setupCommandBuffer 函数，那些添加操作的辅助函数将命令记录到其中，并添加一个 flushSetupCommands 来执行已记录的命令
 
         vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
     }
 
     void copyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size) {
-        VkCommandBuffer commandBuffer = beginSingleTimeCommands();
+        VkCommandBuffer commandBuffer = beginSingleTimeCommands(); // 我们把之前这种单次 CommandBuffer 抽象为辅助函数，把逻辑包在 begin 与 end 里
 
         VkBufferCopy copyRegion{};
         copyRegion.size = size;

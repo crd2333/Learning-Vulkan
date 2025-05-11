@@ -19,12 +19,11 @@
 #include <optional>
 #include <set>
 
-// 实际上，多个描述符可以指向同一个缓冲区，然后归属于不同的描述符集，再绑定到同一个管线布局上，以此实现逐对象和全局的 UBO
-// 可能会想，这个需求通过单个 set 的不同 binding 不是也能实现吗？
-// 即，给一个管线布局分配一个 DescriptorSetLayout，绑定单个 set，这个 set 里有两个 binding，一个逐对象一个全局
+// 实际上，多个描述符可以指向同一个缓冲区，然后归属于不同的描述符集，再绑定到同一个管线布局上，以此实现逐对象和全局的 UBO，达到以前 OpenGL 那样的 UBO 全局更新效果
+// 可能会想，这个需求通过单个 set 的不同 binding 不是也能实现吗？给一个管线布局分配一个 layout，绑定单个 set，这个 set 里有两个 binding，一个逐对象一个全局
 // 但是，由于 recordCommandBuffer() 里绑定描述符 vkCmdBindDescriptorSets 是以 set 为单位，这样那个全局的 binding 实际上也是每次都要重新绑定
 // 因此，我们更倾向于按照更新频率来划分 descriptor set，把逐对象数据、逐通道/材质数据、每帧（全局）数据分开成多个 set，每个 set 内可以有多个 binding，不仅降低绑定开销，也更加模块化
-// 本章试图把 MVP 矩阵的 M 和 VP 分开到两个 set 中去，实现两帧 in-flight，每帧绘制两个物体，这样 VP 可以少更新一次。每个 discriptor 内依然是一个 binding
+// 本章试图把 MVP 矩阵的 M 和 VP 分开到两个 set 中去，实现两帧 in-flight，每帧绘制两个物体，这样 VP 可以少更新一次。每个 discriptor 内依然是一个 binding（26_texture_mapping 会涉及多绑定）
 // 个人也是初学者，可能有不妥之处，请谨慎参考
 
 const uint32_t WIDTH = 800;

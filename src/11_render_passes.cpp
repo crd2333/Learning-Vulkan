@@ -375,7 +375,7 @@ private:
 
         // 每个 Pass 可以包含多个 Sub Pass，Sub Pass 依赖于先前通道中帧缓冲的内容（例如一系列的后处理效果）
         // 把这些操作设置为 Sub Pass 并组合到一个 Render Pass 里，使 Vulkan 能够重新排序操作并节省内存带宽（不过我们的三角形只用单个子通道）
-        // 每个子通道都引用在前面章节中使用结构描述的一个或多个附件
+        // 一个 Render Pass 下的 Sub Passes 共用一个 Framebuffer，但可以*引用*在 Framebuffer 中的不同 Attachments
         VkAttachmentReference colorAttachmentRef{};
         colorAttachmentRef.attachment = 0; // 我们的数组由一个 VkAttachmentDescription 作为颜色缓冲附件组成，所以索引是 0
         colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL; // 指定我们希望在使用此子通道期间引用附件使用的布局方式

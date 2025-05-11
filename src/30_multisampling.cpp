@@ -29,11 +29,20 @@
 #include <set>
 #include <unordered_map>
 
+// 处理频率与采样问题总体有两种方法：Super Sampling（提高采样率）和 Area Sampling（干掉高频信号，可以通过 mipmap 实现）
+// Super Sampling 是为了 Anti-Aliasing，其中一个很具代表性的算法是 MSAA （Multi-Sample Anti-Aliasing），我们将在这一章用 vulkan 实现它
+// 可以回忆一下 OpenGL 中如何实现 MSAA，参考 [LearnOpenGL CN 抗锯齿](https://learnopengl-cn.github.io/04%20Advanced%20OpenGL/11%20Anti%20Aliasing/)
+// 对于 on-screen MASS，大多数的窗口系统都应该提供了一个多重采样缓冲，用以代替默认的颜色缓冲，glfw 同样如此，只需要给个 hint 并启用即可
+// glfwWindowHint(GLFW_SAMPLES, 4);
+// glEnable(GL_MULTISAMPLE); // 多重采样的算法都在 OpenGL 驱动的光栅器中实现了，我们不需要再多做什么
+// 如果是 off-screen MSAA，则也需要创建多重采样纹理附件、多重采样渲染缓冲对象，但总体还是会比 vulkan 简单
+// 下面回到 vulkan，借助这个过程也能让我们更好地理解 MSAA 的工作原理
+
 const uint32_t WIDTH = 800;
 const uint32_t HEIGHT = 600;
 
-const std::string MODEL_PATH = "models/viking_room.obj";
-const std::string TEXTURE_PATH = "textures/viking_room.png";
+const std::string MODEL_PATH = CHAPTER_NAME "/models/viking_room.obj";
+const std::string TEXTURE_PATH = CHAPTER_NAME "/textures/viking_room.png";
 
 const int MAX_FRAMES_IN_FLIGHT = 2;
 
@@ -153,7 +162,7 @@ private:
     VkSurfaceKHR surface;
 
     VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
-    VkSampleCountFlagBits msaaSamples = VK_SAMPLE_COUNT_1_BIT;
+    VkSampleCountFlagBits msaaSamples = VK_SAMPLE_COUNT_1_BIT; // 添加一个类成员来跟踪硬件可以使用的样本数（大多数现代 GPU 至少支持 8 个）
     VkDevice device;
 
     VkQueue graphicsQueue;
@@ -173,6 +182,10 @@ private:
 
     VkCommandPool commandPool;
 
+    // 在 MSAA 中，每个像素都在一个离屏缓冲中采样，然后渲染到屏幕上，这个新的缓冲与我们之前使用的常规图像略有不同
+    // 之前是为交换链中的每个图像创建了对应的帧缓冲，RenderPass 绑定 colorAttachment，渲染时指定该 RenderPass 的目标 FrameBuffer，渲染到对应帧缓冲上
+    // 而现在，这个新的离屏缓冲必须能够存储每个像素的多个样本（多重采样缓冲），然后将其解析到默认帧缓冲（每个像素仅存储一个样本）
+    // 这就是为什么我们需要创建一个额外的渲染目标 —— 多重采样缓冲 来存储中间值。可以把它理解成类似 depth buffer，同一时刻只有一个绘制操作处于活动状态，因此只需要创建一个（而不用像交换链帧缓冲那样创建多个）
     VkImage colorImage;
     VkDeviceMemory colorImageMemory;
     VkImageView colorImageView;
@@ -267,7 +280,7 @@ private:
         vkDestroyImage(device, depthImage, nullptr);
         vkFreeMemory(device, depthImageMemory, nullptr);
 
-        vkDestroyImageView(device, colorImageView, nullptr);
+        vkDestroyImageView(device, colorImageView, nullptr); // 记得像释放 depth buffer 一样释放 color buffer
         vkDestroyImage(device, colorImage, nullptr);
         vkFreeMemory(device, colorImageMemory, nullptr);
 
@@ -346,7 +359,7 @@ private:
 
         createSwapChain();
         createImageViews();
-        createColorResources();
+        createColorResources(); // 记得像重建 depth buffer 一样重建 color buffer
         createDepthResources();
         createFramebuffers();
     }
@@ -429,7 +442,7 @@ private:
         for (const auto& device : devices) {
             if (isDeviceSuitable(device)) {
                 physicalDevice = device;
-                msaaSamples = getMaxUsableSampleCount();
+                msaaSamples = getMaxUsableSampleCount(); // 获取 GPU 支持的最大采样数
                 break;
             }
         }
@@ -457,6 +470,7 @@ private:
 
         VkPhysicalDeviceFeatures deviceFeatures{};
         deviceFeatures.samplerAnisotropy = VK_TRUE;
+        // deviceFeatures.sampleRateShading = VK_TRUE; // 为逻辑设备开启样本着色功能
 
         VkDeviceCreateInfo createInfo{};
         createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -546,17 +560,17 @@ private:
     void createRenderPass() {
         VkAttachmentDescription colorAttachment{};
         colorAttachment.format = swapChainImageFormat;
-        colorAttachment.samples = msaaSamples;
+        colorAttachment.samples = msaaSamples; // 指定为 MSAA 采样数
         colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
         colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
         colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
         colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        colorAttachment.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        colorAttachment.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL; // 从 _PRESENT_SRC_KHR 更改为 _COLOR_ATTACHMENT_OPTIMAL，因为它不再是用于呈现的颜色附件
 
         VkAttachmentDescription depthAttachment{};
         depthAttachment.format = findDepthFormat();
-        depthAttachment.samples = msaaSamples;
+        depthAttachment.samples = msaaSamples; // 指定为 MSAA 采样数
         depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
         depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
         depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
@@ -564,6 +578,7 @@ private:
         depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
+        // 为此我们需要创建一个新的用于呈现的颜色附件，即所谓的解析附件 resolve attachment
         VkAttachmentDescription colorAttachmentResolve{};
         colorAttachmentResolve.format = swapChainImageFormat;
         colorAttachmentResolve.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -582,6 +597,7 @@ private:
         depthAttachmentRef.attachment = 1;
         depthAttachmentRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
+        // 创建一个新的附件引用，它将指向将用作解析目标的颜色缓冲
         VkAttachmentReference colorAttachmentResolveRef{};
         colorAttachmentResolveRef.attachment = 2;
         colorAttachmentResolveRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -591,17 +607,21 @@ private:
         subpass.colorAttachmentCount = 1;
         subpass.pColorAttachments = &colorAttachmentRef;
         subpass.pDepthStencilAttachment = &depthAttachmentRef;
-        subpass.pResolveAttachments = &colorAttachmentResolveRef;
+        subpass.pResolveAttachments = &colorAttachmentResolveRef; // 在 SubPass 添加对解析附件的引用
+        // 从 ResolveAttachments 被列为 VkSubpassDescription 的结构，以及创建渲染管线时需要指定 MSAA 相关信息来看，可以推断出：
+        // “硬件如何从多重采样缓冲 colorAttachment 中解析出单个样本”这件事实际上是由驱动完成的，不需要我们来做。换句话说，这些东西已经被吸收进 vulkan 标准，硬件必须实现
+        // 我们需要做的就是设置好这几个缓冲，然后在 GraphicsPipeline 时启用这个功能即可
 
         VkSubpassDependency dependency{};
         dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
         dependency.dstSubpass = 0;
         dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
-        dependency.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        // 这里好像比之前多了个 _WRITE_BIT？反正 Vulkan Example 里是没有的，网页教程里也没有提到，个人觉得多余，注释掉了
+        dependency.srcAccessMask = /*VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | */VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
         dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-        dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT /* | K_ACCESS_COLOR_ATTACHMENT_READ_BIT */ | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT /* | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT */;
 
-        std::array<VkAttachmentDescription, 3> attachments = {colorAttachment, depthAttachment, colorAttachmentResolve };
+        std::array<VkAttachmentDescription, 3> attachments = {colorAttachment, depthAttachment, colorAttachmentResolve }; // 使用新的附件更新 RenderPass 信息结构
         VkRenderPassCreateInfo renderPassInfo{};
         renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
         renderPassInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
@@ -694,10 +714,14 @@ private:
         rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
         rasterizer.depthBiasEnable = VK_FALSE;
 
+        // MSAA
         VkPipelineMultisampleStateCreateInfo multisampling{};
         multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-        multisampling.sampleShadingEnable = VK_FALSE;
-        multisampling.rasterizationSamples = msaaSamples;
+        multisampling.sampleShadingEnable = VK_FALSE;     // MSAA 仅平滑几何体的边缘，但不平滑内部纹理的填充（这是 MSAA 算法的一个优化），但可能会导致屏幕上一个应用了高对比度颜色纹理的平滑多边形仍然会显得走样
+                                                          // 我们可以通过开启样本着色 sample shading 来解决这个问题，但会导致性能下降（需要同时在逻辑设备上开启这一功能）
+        // multisampling.sampleShadingEnable = VK_TRUE;   // 在渲染关心上开启样本着色功能
+        // multisampling.minSampleShading = .2f;          // 样本着色的最小采样率，0.2f 表示每个像素至少要使用 20% 的样本来进行采样（越靠近 1 越平滑）
+        multisampling.rasterizationSamples = msaaSamples; // 告诉新创建的管线使用多个样本，之前是 VK_SAMPLE_COUNT_1_BIT
 
         VkPipelineDepthStencilStateCreateInfo depthStencil{};
         depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
@@ -768,6 +792,7 @@ private:
     void createFramebuffers() {
         swapChainFramebuffers.resize(swapChainImageViews.size());
 
+        // 在 RenderPass 就位后，修改 createFramebuffers 并将新的图像视图添加到列表中
         for (size_t i = 0; i < swapChainImageViews.size(); i++) {
             std::array<VkImageView, 3> attachments = {
                 colorImageView,
@@ -803,9 +828,12 @@ private:
         }
     }
 
+    // 创建一个 createColorResources 函数
     void createColorResources() {
         VkFormat colorFormat = swapChainImageFormat;
 
+        // 为 image 指定 msaaSamples 的采样数
+        // 仅使用一个 mip level，因为它不会用作纹理，不需要 mipmap；而且 vulkan 规范强制对每个像素具有多个样本的图像使用一个 mip level
         createImage(swapChainExtent.width, swapChainExtent.height, 1, msaaSamples, colorFormat, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, colorImage, colorImageMemory);
         colorImageView = createImageView(colorImage, colorFormat, VK_IMAGE_ASPECT_COLOR_BIT, 1);
     }
@@ -813,6 +841,7 @@ private:
     void createDepthResources() {
         VkFormat depthFormat = findDepthFormat();
 
+        // depth buffer 也需要使用 msaaSamples 的采样数
         createImage(swapChainExtent.width, swapChainExtent.height, 1, msaaSamples, depthFormat, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, depthImage, depthImageMemory);
         depthImageView = createImageView(depthImage, depthFormat, VK_IMAGE_ASPECT_DEPTH_BIT, 1);
     }
@@ -865,6 +894,7 @@ private:
 
         stbi_image_free(pixels);
 
+        // 纹理不需要多个 numSamples
         createImage(texWidth, texHeight, mipLevels, VK_SAMPLE_COUNT_1_BIT, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, textureImage, textureImageMemory);
 
         transitionImageLayout(textureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, mipLevels);
@@ -964,6 +994,7 @@ private:
         endSingleTimeCommands(commandBuffer);
     }
 
+    // 添加一个函数来查询物理设备支持的最大样本数
     VkSampleCountFlagBits getMaxUsableSampleCount() {
         VkPhysicalDeviceProperties physicalDeviceProperties;
         vkGetPhysicalDeviceProperties(physicalDevice, &physicalDeviceProperties);
@@ -1030,6 +1061,7 @@ private:
         return imageView;
     }
 
+    // 修改 createImage 函数，添加 numSamples 函数
     void createImage(uint32_t width, uint32_t height, uint32_t mipLevels, VkSampleCountFlagBits numSamples, VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage, VkMemoryPropertyFlags properties, VkImage& image, VkDeviceMemory& imageMemory) {
         VkImageCreateInfo imageInfo{};
         imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -1412,31 +1444,31 @@ private:
 
         vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
 
-            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
 
-            VkViewport viewport{};
-            viewport.x = 0.0f;
-            viewport.y = 0.0f;
-            viewport.width = (float) swapChainExtent.width;
-            viewport.height = (float) swapChainExtent.height;
-            viewport.minDepth = 0.0f;
-            viewport.maxDepth = 1.0f;
-            vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+        VkViewport viewport{};
+        viewport.x = 0.0f;
+        viewport.y = 0.0f;
+        viewport.width = (float) swapChainExtent.width;
+        viewport.height = (float) swapChainExtent.height;
+        viewport.minDepth = 0.0f;
+        viewport.maxDepth = 1.0f;
+        vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
 
-            VkRect2D scissor{};
-            scissor.offset = {0, 0};
-            scissor.extent = swapChainExtent;
-            vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+        VkRect2D scissor{};
+        scissor.offset = {0, 0};
+        scissor.extent = swapChainExtent;
+        vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
-            VkBuffer vertexBuffers[] = {vertexBuffer};
-            VkDeviceSize offsets[] = {0};
-            vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
+        VkBuffer vertexBuffers[] = {vertexBuffer};
+        VkDeviceSize offsets[] = {0};
+        vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
 
-            vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+        vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
-            vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descriptorSets[currentFrame], 0, nullptr);
+        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descriptorSets[currentFrame], 0, nullptr);
 
-            vkCmdDrawIndexed(commandBuffer, static_cast<uint32_t>(indices.size()), 1, 0, 0, 0);
+        vkCmdDrawIndexed(commandBuffer, static_cast<uint32_t>(indices.size()), 1, 0, 0, 0);
 
         vkCmdEndRenderPass(commandBuffer);
 

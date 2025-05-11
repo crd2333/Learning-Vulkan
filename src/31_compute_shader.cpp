@@ -23,6 +23,34 @@
 #include <set>
 #include <random>
 
+// 终于，我们来到了 vulkan tutorial 的最后一个章节！之前的所有章节都只涉及 vulkan 管线的传统图形部分，现在我们将利用计算着色器步入 GPGPU 的世界
+// GPGPU 可以使用的几个示例包括图像处理、可见性测试、后期处理、高级光照计算、动画、物理（例如粒子系统）等等，甚至是跟图形学基本无关的数值计算或 AI 用途
+// 很重要的一点是，vulkan 规定了计算与管线的图形部分完全分离，这在网站上那张图上看得会更清楚。另外描述符集也可以由计算使用
+// 本章我们将要实现的实例是一个基于 GPU 的粒子系统，需要两个主要组件：顶点（作为顶点缓冲传递）和基于某些方程更新它们的方式
+
+// 计算着色器引入的一个重要概念是任意读取和写入缓冲的能力。为此，Vulkan 提供了两种专用存储类型：
+// 1. 着色器存储缓冲对象 (Shader Storage Buffer Object, SSBO)；2. 存储图像 (Storage Images)
+// 本章将围绕前者展开，这里对后者做一些说明，其典型用例是将图像效果应用于纹理，进行后期处理或生成 mipmap
+
+// 可以这样创建 storage image（实际上我们之前一直在这么用）
+// VkImageCreateInfo imageInfo{};
+// ...
+// imageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT; // 作为片段着色器中采样的图像和*作为计算着色器中的存储图像*
+// ...
+//
+// if (vkCreateImage(device, &imageInfo, nullptr, &textureImage) != VK_SUCCESS) {
+//     throw std::runtime_error("failed to create image!");
+// }
+
+// 存储图像的 GLSL 着色器声明类似于例如在片段着色器中使用的采样图像
+// 此处的一些区别在于额外的属性，例如图像格式的 rgba8，readonly 和 writeonly 限定符，告诉实现我们将仅从输入图像读取并写入输出图像，以及用 image2D 来声明
+// layout(binding = 0, rgba8) uniform readonly image2D inputImage;
+// layout(binding = 1, rgba8) uniform writeonly image2D outputImage;
+
+// 然后在计算着色器中可以使用 imageLoad 和 imageStore 完成存储图像的读取和写入
+// vec3 pixel = imageLoad(inputImage, ivec2(gl_GlobalInvocationID.xy)).rgb;
+// imageStore(outputImage, ivec2(gl_GlobalInvocationID.xy), pixel);
+
 const uint32_t WIDTH = 800;
 const uint32_t HEIGHT = 600;
 
@@ -45,16 +73,17 @@ const bool enableValidationLayers = true;
 #endif
 
 VkResult CreateDebugUtilsMessengerEXT(VkInstance instance, const VkDebugUtilsMessengerCreateInfoEXT* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkDebugUtilsMessengerEXT* pDebugMessenger) {
-    auto func = (PFN_vkCreateDebugUtilsMessengerEXT) vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT");
+    auto func = (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT");
     if (func != nullptr) {
         return func(instance, pCreateInfo, pAllocator, pDebugMessenger);
-    } else {
+    }
+    else {
         return VK_ERROR_EXTENSION_NOT_PRESENT;
     }
 }
 
 void DestroyDebugUtilsMessengerEXT(VkInstance instance, VkDebugUtilsMessengerEXT debugMessenger, const VkAllocationCallbacks* pAllocator) {
-    auto func = (PFN_vkDestroyDebugUtilsMessengerEXT) vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT");
+    auto func = (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT");
     if (func != nullptr) {
         func(instance, debugMessenger, pAllocator);
     }
@@ -96,10 +125,14 @@ struct Particle {
     static std::array<VkVertexInputAttributeDescription, 2> getAttributeDescriptions() {
         std::array<VkVertexInputAttributeDescription, 2> attributeDescriptions{};
 
+        // 对于计算着色器处的数据，我们是采用循环赋值并 memcpy 到 staging buffer，再 copyBuffer 到对应 SSBO 上的（回忆，创建 vertex buffer 的步骤其实跟这个 SSBO 差不多）
+        // 而这个 SSBO 的数据也可以直接用于顶点着色器，不需要额外创建一个 vertex buffer（因为我们为 usage 同时指定了 _VERTEX_BUFFER_BIT 和 _STORAGE_BUFFER_BIT）
         attributeDescriptions[0].binding = 0;
         attributeDescriptions[0].location = 0;
         attributeDescriptions[0].format = VK_FORMAT_R32G32_SFLOAT;
         attributeDescriptions[0].offset = offsetof(Particle, position);
+
+        // 没有将 velocity 添加到顶点输入属性，因为它仅供计算着色器使用
 
         attributeDescriptions[1].binding = 0;
         attributeDescriptions[1].location = 1;
@@ -150,6 +183,7 @@ private:
 
     VkCommandPool commandPool;
 
+    // 创建 SSBO，对于本例子，我们将会把粒子数组上传到 GPU，从而直接在 GPU 内存也就是这些 SSBO 上进行计算。跟 in-flight 章一样，我们创建两帧的 SSBO
     std::vector<VkBuffer> shaderStorageBuffers;
     std::vector<VkDeviceMemory> shaderStorageBuffersMemory;
 
@@ -334,8 +368,9 @@ private:
             createInfo.ppEnabledLayerNames = validationLayers.data();
 
             populateDebugMessengerCreateInfo(debugCreateInfo);
-            createInfo.pNext = (VkDebugUtilsMessengerCreateInfoEXT*) &debugCreateInfo;
-        } else {
+            createInfo.pNext = (VkDebugUtilsMessengerCreateInfoEXT*)&debugCreateInfo;
+        }
+        else {
             createInfo.enabledLayerCount = 0;
 
             createInfo.pNext = nullptr;
@@ -398,7 +433,7 @@ private:
         QueueFamilyIndices indices = findQueueFamilies(physicalDevice);
 
         std::vector<VkDeviceQueueCreateInfo> queueCreateInfos;
-        std::set<uint32_t> uniqueQueueFamilies = {indices.graphicsAndComputeFamily.value(), indices.presentFamily.value()};
+        std::set<uint32_t> uniqueQueueFamilies = { indices.graphicsAndComputeFamily.value(), indices.presentFamily.value() }; // 从队列族获取（图形+）计算队列
 
         float queuePriority = 1.0f;
         for (uint32_t queueFamily : uniqueQueueFamilies) {
@@ -426,7 +461,8 @@ private:
         if (enableValidationLayers) {
             createInfo.enabledLayerCount = static_cast<uint32_t>(validationLayers.size());
             createInfo.ppEnabledLayerNames = validationLayers.data();
-        } else {
+        }
+        else {
             createInfo.enabledLayerCount = 0;
         }
 
@@ -463,13 +499,14 @@ private:
         createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 
         QueueFamilyIndices indices = findQueueFamilies(physicalDevice);
-        uint32_t queueFamilyIndices[] = {indices.graphicsAndComputeFamily.value(), indices.presentFamily.value()};
+        uint32_t queueFamilyIndices[] = { indices.graphicsAndComputeFamily.value(), indices.presentFamily.value() };
 
         if (indices.graphicsAndComputeFamily != indices.presentFamily) {
             createInfo.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
             createInfo.queueFamilyIndexCount = 2;
             createInfo.pQueueFamilyIndices = queueFamilyIndices;
-        } else {
+        }
+        else {
             createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
         }
 
@@ -558,16 +595,19 @@ private:
     }
 
     void createComputeDescriptorSetLayout() {
+        // 为计算设置描述符几乎与图形相同，唯一的区别是类型需要设置为 VK_SHADER_STAGE_COMPUTE_BIT，以便计算阶段可以访问它们
+        // 回忆一下，在图形那边我们设置的是两个 binding —— uboLayoutBinding 与 samplerLayoutBinding
+        // 这里我们设置了一个 UBO 和两个 SSBO。即使我们只渲染单个粒子系统，由于粒子位置是逐帧更新的，每一帧都需要了解上一帧的粒子位置，这就是为什么我们需要两个 SSBO
         std::array<VkDescriptorSetLayoutBinding, 3> layoutBindings{};
         layoutBindings[0].binding = 0;
         layoutBindings[0].descriptorCount = 1;
-        layoutBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        layoutBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; // 这个是 UBO
         layoutBindings[0].pImmutableSamplers = nullptr;
-        layoutBindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        layoutBindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT; // 这个 flag 是可以组合的，比如 _VERTEX_BIT 和 _COMPUTE_BIT 组合，则描述符从顶点和计算阶段都可以访问
 
         layoutBindings[1].binding = 1;
         layoutBindings[1].descriptorCount = 1;
-        layoutBindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        layoutBindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; // 下面两个是 SSBO
         layoutBindings[1].pImmutableSamplers = nullptr;
         layoutBindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
@@ -607,7 +647,7 @@ private:
         fragShaderStageInfo.module = fragShaderModule;
         fragShaderStageInfo.pName = "main";
 
-        VkPipelineShaderStageCreateInfo shaderStages[] = {vertShaderStageInfo, fragShaderStageInfo};
+        VkPipelineShaderStageCreateInfo shaderStages[] = { vertShaderStageInfo, fragShaderStageInfo };
 
         VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
         vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
@@ -622,7 +662,7 @@ private:
 
         VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
         inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-        inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
+        inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST; // 这里绘制粒子而不是之前的三角形 VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST
         inputAssembly.primitiveRestartEnable = VK_FALSE;
 
         VkPipelineViewportStateCreateInfo viewportState{};
@@ -709,20 +749,22 @@ private:
     }
 
     void createComputePipeline() {
+        // 加载计算着色器的方法跟加载其它着色器相同
         auto computeShaderCode = readFile(CHAPTER_NAME "/shaders/comp.spv");
 
         VkShaderModule computeShaderModule = createShaderModule(computeShaderCode);
 
         VkPipelineShaderStageCreateInfo computeShaderStageInfo{};
         computeShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-        computeShaderStageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        computeShaderStageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT; // 这里要改为计算着色器
         computeShaderStageInfo.module = computeShaderModule;
         computeShaderStageInfo.pName = "main";
 
+        // 创建计算管线布局，不涉及任何光栅化状态，需要设置的东西少得多
         VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
         pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
         pipelineLayoutInfo.setLayoutCount = 1;
-        pipelineLayoutInfo.pSetLayouts = &computeDescriptorSetLayout;
+        pipelineLayoutInfo.pSetLayouts = &computeDescriptorSetLayout; // 引用 compute 的描述符集布局
 
         if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &computePipelineLayout) != VK_SUCCESS) {
             throw std::runtime_error("failed to create compute pipeline layout!");
@@ -733,6 +775,7 @@ private:
         pipelineInfo.layout = computePipelineLayout;
         pipelineInfo.stage = computeShaderStageInfo;
 
+        // 之前调用的是 vkCreateGraphicsPipelines，现在改成 ComputePipelines
         if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &computePipeline) != VK_SUCCESS) {
             throw std::runtime_error("failed to create compute pipeline!");
         }
@@ -777,12 +820,11 @@ private:
     }
 
     void createShaderStorageBuffers() {
-
-        // Initialize particles
+        // 在主机内存中初始化粒子向量
         std::default_random_engine rndEngine((unsigned)time(nullptr));
         std::uniform_real_distribution<float> rndDist(0.0f, 1.0f);
 
-        // Initial particle positions on a circle
+        // 利用循环初始化粒子位置
         std::vector<Particle> particles(PARTICLE_COUNT);
         for (auto& particle : particles) {
             float r = 0.25f * sqrt(rndDist(rndEngine));
@@ -790,13 +832,13 @@ private:
             float x = r * cos(theta) * HEIGHT / WIDTH;
             float y = r * sin(theta);
             particle.position = glm::vec2(x, y);
-            particle.velocity = glm::normalize(glm::vec2(x,y)) * 0.00025f;
+            particle.velocity = glm::normalize(glm::vec2(x, y)) * 0.00025f;
             particle.color = glm::vec4(rndDist(rndEngine), rndDist(rndEngine), rndDist(rndEngine), 1.0f);
         }
 
         VkDeviceSize bufferSize = sizeof(Particle) * PARTICLE_COUNT;
 
-        // Create a staging buffer used to upload data to the gpu
+        // 创建 staging buffer 来保存初始粒子属性
         VkBuffer stagingBuffer;
         VkDeviceMemory stagingBufferMemory;
         createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
@@ -809,15 +851,16 @@ private:
         shaderStorageBuffers.resize(MAX_FRAMES_IN_FLIGHT);
         shaderStorageBuffersMemory.resize(MAX_FRAMES_IN_FLIGHT);
 
-        // Copy initial particle data to all storage buffers
+        // 创建每个帧的 SSBO，然后复制所有粒子数据到 GPU
         for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+            // 给 usage 设置的两个标志 _VERTEX_BUFFER_BIT 和 _USAGE_STORAGE_BUFFER_BIT 告诉实现我们希望将此缓冲用于两种不同的场景：作为顶点着色器中的顶点缓冲和作为（给计算着色器用的）存储缓冲
+            // 而后者正是比我们之前创建 vertex buffer 时所多出来的部分，其它的 _TRANSFER_DST_BIT 和 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT 都是一样的逻辑
             createBuffer(bufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, shaderStorageBuffers[i], shaderStorageBuffersMemory[i]);
             copyBuffer(stagingBuffer, shaderStorageBuffers[i], bufferSize);
         }
 
         vkDestroyBuffer(device, stagingBuffer, nullptr);
         vkFreeMemory(device, stagingBufferMemory, nullptr);
-
     }
 
     void createUniformBuffers() {
@@ -835,6 +878,7 @@ private:
     }
 
     void createDescriptorPool() {
+        // 描述符池也需要做相应更改，分配 MAX_FRAMES_IN_FLIGHT 个 UBO 和 MAX_FRAMES_IN_FLIGHT * 2 个 SSBO
         std::array<VkDescriptorPoolSize, 2> poolSizes{};
         poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         poolSizes[0].descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
@@ -844,7 +888,7 @@ private:
 
         VkDescriptorPoolCreateInfo poolInfo{};
         poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-        poolInfo.poolSizeCount = 2;
+        poolInfo.poolSizeCount = 2; // 一共请求两个描述集，分配两个
         poolInfo.pPoolSizes = poolSizes.data();
         poolInfo.maxSets = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
 
@@ -857,7 +901,7 @@ private:
         std::vector<VkDescriptorSetLayout> layouts(MAX_FRAMES_IN_FLIGHT, computeDescriptorSetLayout);
         VkDescriptorSetAllocateInfo allocInfo{};
         allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-        allocInfo.descriptorPool = descriptorPool;
+        allocInfo.descriptorPool = descriptorPool; // 指定描述符池
         allocInfo.descriptorSetCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
         allocInfo.pSetLayouts = layouts.data();
 
@@ -866,13 +910,16 @@ private:
             throw std::runtime_error("failed to allocate descriptor sets!");
         }
 
+        // 分配描述符集后，用一个循环来填充其中的每个描述符
         for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+            std::array<VkWriteDescriptorSet, 3> descriptorWrites{};
+
+            // UBO，绑定到 binding 0
             VkDescriptorBufferInfo uniformBufferInfo{};
             uniformBufferInfo.buffer = uniformBuffers[i];
             uniformBufferInfo.offset = 0;
             uniformBufferInfo.range = sizeof(UniformBufferObject);
 
-            std::array<VkWriteDescriptorSet, 3> descriptorWrites{};
             descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             descriptorWrites[0].dstSet = computeDescriptorSets[i];
             descriptorWrites[0].dstBinding = 0;
@@ -881,8 +928,9 @@ private:
             descriptorWrites[0].descriptorCount = 1;
             descriptorWrites[0].pBufferInfo = &uniformBufferInfo;
 
+            // 上一帧的 SSBO，绑定到 binding 1
             VkDescriptorBufferInfo storageBufferInfoLastFrame{};
-            storageBufferInfoLastFrame.buffer = shaderStorageBuffers[(i - 1) % MAX_FRAMES_IN_FLIGHT];
+            storageBufferInfoLastFrame.buffer = shaderStorageBuffers[(i - 1) % MAX_FRAMES_IN_FLIGHT]; // i - 1，也就是绑定到上一帧的 buffer
             storageBufferInfoLastFrame.offset = 0;
             storageBufferInfoLastFrame.range = sizeof(Particle) * PARTICLE_COUNT;
 
@@ -894,6 +942,7 @@ private:
             descriptorWrites[1].descriptorCount = 1;
             descriptorWrites[1].pBufferInfo = &storageBufferInfoLastFrame;
 
+            // 当前帧的 SSBO，绑定到 binding 2
             VkDescriptorBufferInfo storageBufferInfoCurrentFrame{};
             storageBufferInfoCurrentFrame.buffer = shaderStorageBuffers[i];
             storageBufferInfoCurrentFrame.offset = 0;
@@ -910,7 +959,6 @@ private:
             vkUpdateDescriptorSets(device, 3, descriptorWrites.data(), 0, nullptr);
         }
     }
-
 
     void createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& bufferMemory) {
         VkBufferCreateInfo bufferInfo{};
@@ -991,7 +1039,7 @@ private:
         allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
         allocInfo.commandPool = commandPool;
         allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        allocInfo.commandBufferCount = (uint32_t) commandBuffers.size();
+        allocInfo.commandBufferCount = (uint32_t)commandBuffers.size();
 
         if (vkAllocateCommandBuffers(device, &allocInfo, commandBuffers.data()) != VK_SUCCESS) {
             throw std::runtime_error("failed to allocate command buffers!");
@@ -1024,35 +1072,35 @@ private:
         renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
         renderPassInfo.renderPass = renderPass;
         renderPassInfo.framebuffer = swapChainFramebuffers[imageIndex];
-        renderPassInfo.renderArea.offset = {0, 0};
+        renderPassInfo.renderArea.offset = { 0, 0 };
         renderPassInfo.renderArea.extent = swapChainExtent;
 
-        VkClearValue clearColor = {{{0.0f, 0.0f, 0.0f, 1.0f}}};
+        VkClearValue clearColor = { {{0.0f, 0.0f, 0.0f, 1.0f}} };
         renderPassInfo.clearValueCount = 1;
         renderPassInfo.pClearValues = &clearColor;
 
         vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
 
-            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
 
-            VkViewport viewport{};
-            viewport.x = 0.0f;
-            viewport.y = 0.0f;
-            viewport.width = (float) swapChainExtent.width;
-            viewport.height = (float) swapChainExtent.height;
-            viewport.minDepth = 0.0f;
-            viewport.maxDepth = 1.0f;
-            vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+        VkViewport viewport{};
+        viewport.x = 0.0f;
+        viewport.y = 0.0f;
+        viewport.width = (float)swapChainExtent.width;
+        viewport.height = (float)swapChainExtent.height;
+        viewport.minDepth = 0.0f;
+        viewport.maxDepth = 1.0f;
+        vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
 
-            VkRect2D scissor{};
-            scissor.offset = {0, 0};
-            scissor.extent = swapChainExtent;
-            vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+        VkRect2D scissor{};
+        scissor.offset = { 0, 0 };
+        scissor.extent = swapChainExtent;
+        vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
-            VkDeviceSize offsets[] = {0};
-            vkCmdBindVertexBuffers(commandBuffer, 0, 1, &shaderStorageBuffers[currentFrame], offsets);
+        VkDeviceSize offsets[] = { 0 };
+        vkCmdBindVertexBuffers(commandBuffer, 0, 1, &shaderStorageBuffers[currentFrame], offsets); // 使用 SSBO 代替之前的 vertex buffer
 
-            vkCmdDraw(commandBuffer, PARTICLE_COUNT, 1, 0, 0);
+        vkCmdDraw(commandBuffer, PARTICLE_COUNT, 1, 0, 0); // 没有 Indexed，因为我们没有设置 index buffer（也不需要，因为是在绘制粒子）
 
         vkCmdEndRenderPass(commandBuffer);
 
@@ -1073,27 +1121,31 @@ private:
 
         vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipelineLayout, 0, 1, &computeDescriptorSets[currentFrame], 0, nullptr);
 
+        // 工作组和调用的概念感觉跟 cuda 比较像，具体可以看网页教程
+        // 工作组和局部大小的最大计数因实现而异，因此应该在 VkPhysicalDeviceLimits 中检查与计算相关的 maxComputeWorkGroupCount, maxComputeWorkGroupInvocations, maxComputeWorkGroupSize，这里略过了
+        // CmdDispatch 对于 Compute 就好像 CmdDraw 对与 Graphics 一样
+        // 我们只处理一维数组，只需要指定 x 维度。256 是 compute shader 内设定的 local_size_x 值，我们将分发 PARTICLE_COUNT / groupCountX 个工作组，每个工作组进行 groupCountX 次计算着色器调用
         vkCmdDispatch(commandBuffer, PARTICLE_COUNT / 256, 1, 1);
 
         if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
             throw std::runtime_error("failed to record compute command buffer!");
         }
-
     }
 
     void createSyncObjects() {
+        // 为计算工作增加一组新的同步对象
         imageAvailableSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
         renderFinishedSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
-        computeFinishedSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
+        computeFinishedSemaphores.resize(MAX_FRAMES_IN_FLIGHT); // semaphore
         inFlightFences.resize(MAX_FRAMES_IN_FLIGHT);
-        computeInFlightFences.resize(MAX_FRAMES_IN_FLIGHT);
+        computeInFlightFences.resize(MAX_FRAMES_IN_FLIGHT);     // fence
 
         VkSemaphoreCreateInfo semaphoreInfo{};
         semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
 
         VkFenceCreateInfo fenceInfo{};
         fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-        fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+        fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT; // 计算 fence 与图形 fence 一样，在 signaled 状态下创建
 
         for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
             if (vkCreateSemaphore(device, &semaphoreInfo, nullptr, &imageAvailableSemaphores[i]) != VK_SUCCESS ||
@@ -1116,46 +1168,54 @@ private:
     }
 
     void drawFrame() {
+        // 由于我们的实例同时执行计算和图形操作，我们将为每一帧分别向图形和计算队列提交一次
         VkSubmitInfo submitInfo{};
         submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 
-        // Compute submission
-        vkWaitForFences(device, 1, &computeInFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
+        // Compute 提交，使用计算着色器更新粒子位置
+        vkWaitForFences(device, 1, &computeInFlightFences[currentFrame], VK_TRUE, UINT64_MAX); // compute 需要等待上一次的 compute 结束（但不需要等待绘制完成）
 
         updateUniformBuffer(currentFrame);
 
-        vkResetFences(device, 1, &computeInFlightFences[currentFrame]);
+        vkResetFences(device, 1, &computeInFlightFences[currentFrame]); // 等待上一次的 compute 结束后重置为未发信号状态
 
+        // 现在可以记录命令缓冲区并提交到计算队列了，首先第一件事是重置，其第二个参数是 VkCommandBufferResetFlagBits 标志，保留为 0 不做特殊操作
         vkResetCommandBuffer(computeCommandBuffers[currentFrame], /*VkCommandBufferResetFlagBits*/ 0);
         recordComputeCommandBuffer(computeCommandBuffers[currentFrame]);
 
         submitInfo.commandBufferCount = 1;
         submitInfo.pCommandBuffers = &computeCommandBuffers[currentFrame];
         submitInfo.signalSemaphoreCount = 1;
-        submitInfo.pSignalSemaphores = &computeFinishedSemaphores[currentFrame];
+        submitInfo.pSignalSemaphores = &computeFinishedSemaphores[currentFrame]; // 计算完成后给 finished 信号量发 signal
 
         if (vkQueueSubmit(computeQueue, 1, &submitInfo, computeInFlightFences[currentFrame]) != VK_SUCCESS) {
             throw std::runtime_error("failed to submit compute command buffer!");
-        };
+        }
 
-        // Graphics submission
-        vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
+        // Graphics 提交，使用更新后的数据来绘制粒子系统
+        vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX); // 绘制需要等待上一次的绘制结束（从而避免一次绘制多个帧）
+        // 不需要等待 compute 完成是因为在提交时用 semaphore 等待了
 
         uint32_t imageIndex;
         VkResult result = vkAcquireNextImageKHR(device, swapChain, UINT64_MAX, imageAvailableSemaphores[currentFrame], VK_NULL_HANDLE, &imageIndex);
 
-        if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+        if (result == VK_ERROR_OUT_OF_DATE_KHR) { // 确认交换链是否过期或次优
             recreateSwapChain();
             return;
-        } else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+        }
+        else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
             throw std::runtime_error("failed to acquire swap chain image!");
         }
 
-        vkResetFences(device, 1, &inFlightFences[currentFrame]);
+        vkResetFences(device, 1, &inFlightFences[currentFrame]); // 重置 fence
 
+        // 现在可以记录命令缓冲区并提交到图形队列了，首先第一件事是重置，其第二个参数是 VkCommandBufferResetFlagBits 标志，保留为 0 不做特殊操作
         vkResetCommandBuffer(commandBuffers[currentFrame], /*VkCommandBufferResetFlagBits*/ 0);
         recordCommandBuffer(commandBuffers[currentFrame], imageIndex);
 
+        // 指定要等待哪些信号量以及在哪些阶段等待
+        // 等待的信号量在之前等待图像呈现 (i.e. imageAvailableSemaphores) 的基础上多了 computeFinishedSemaphores，等待 compute 完成再提交图形工作（因此在计算缓冲仍在更新顶点时，它不会开始获取顶点）
+        // 等待的阶段在之前“在图像可用之前阻塞在向图像写入颜色阶段（输出到颜色附件）” (i.e. COLOR_ATTACHMENT_OUTPUT_BIT) 的基础上多了 _VERTEX_INPUT_BIT，在计算完成之前阻塞在顶点输入阶段
         VkSemaphore waitSemaphores[] = { computeFinishedSemaphores[currentFrame], imageAvailableSemaphores[currentFrame] };
         VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
         submitInfo = {};
@@ -1179,7 +1239,7 @@ private:
         presentInfo.waitSemaphoreCount = 1;
         presentInfo.pWaitSemaphores = &renderFinishedSemaphores[currentFrame];
 
-        VkSwapchainKHR swapChains[] = {swapChain};
+        VkSwapchainKHR swapChains[] = { swapChain };
         presentInfo.swapchainCount = 1;
         presentInfo.pSwapchains = swapChains;
 
@@ -1190,7 +1250,8 @@ private:
         if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || framebufferResized) {
             framebufferResized = false;
             recreateSwapChain();
-        } else if (result != VK_SUCCESS) {
+        }
+        else if (result != VK_SUCCESS) {
             throw std::runtime_error("failed to present swap chain image!");
         }
 
@@ -1234,7 +1295,8 @@ private:
     VkExtent2D chooseSwapExtent(const VkSurfaceCapabilitiesKHR& capabilities) {
         if (capabilities.currentExtent.width != std::numeric_limits<uint32_t>::max()) {
             return capabilities.currentExtent;
-        } else {
+        }
+        else {
             int width, height;
             glfwGetFramebufferSize(window, &width, &height);
 
@@ -1313,9 +1375,11 @@ private:
         std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
         vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, queueFamilies.data());
 
+        // Vulkan 要求支持图形操作的实现至少有一个同时支持图形和计算操作的队列族，但也可能实现提供专用的计算队列，这种专用计算队列（没有 graphics_bit）暗示这是个异步计算队列
+        // 为了简单起见，我们将使用可以同时执行图形和计算操作的队列，这也使得我们免于处理几种高级同步机制
         int i = 0;
         for (const auto& queueFamily : queueFamilies) {
-            if ((queueFamily.queueFlags & VK_QUEUE_GRAPHICS_BIT) && (queueFamily.queueFlags & VK_QUEUE_COMPUTE_BIT)) {
+            if ((queueFamily.queueFlags & VK_QUEUE_GRAPHICS_BIT) && (queueFamily.queueFlags & VK_QUEUE_COMPUTE_BIT)) { // 计算使用队列族属性标志位 VK_QUEUE_COMPUTE_BIT
                 indices.graphicsAndComputeFamily = i;
             }
 
@@ -1382,7 +1446,7 @@ private:
             throw std::runtime_error("failed to open file!");
         }
 
-        size_t fileSize = (size_t) file.tellg();
+        size_t fileSize = (size_t)file.tellg();
         std::vector<char> buffer(fileSize);
 
         file.seekg(0);
@@ -1405,7 +1469,8 @@ int main() {
 
     try {
         app.run();
-    } catch (const std::exception& e) {
+    }
+    catch (const std::exception& e) {
         std::cerr << e.what() << std::endl;
         return EXIT_FAILURE;
     }

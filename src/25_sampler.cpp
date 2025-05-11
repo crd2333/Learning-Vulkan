@@ -22,6 +22,8 @@
 #include <optional>
 #include <set>
 
+// 本章简单地创建了 sampler 和 image view，但还没有公开给着色器（留到下一章）
+
 const uint32_t WIDTH = 800;
 const uint32_t HEIGHT = 600;
 
@@ -157,7 +159,9 @@ private:
 
     VkImage textureImage;
     VkDeviceMemory textureImageMemory;
+    // 正如之前在交换链图像和帧缓冲中所述，图像是通过图像视图而不是直接访问的，纹理图像也需要这样一个视图
     VkImageView textureImageView;
+    // 着色器可以从图像中直接读取纹素，但这并不常见，一般我们通过采样器来访问纹理，它将应用 filter 和 transform 来计算最终得到的颜色
     VkSampler textureSampler;
 
     VkBuffer vertexBuffer;
@@ -256,8 +260,8 @@ private:
 
         vkDestroyDescriptorPool(device, descriptorPool, nullptr);
 
-        vkDestroySampler(device, textureSampler, nullptr);
-        vkDestroyImageView(device, textureImageView, nullptr);
+        vkDestroySampler(device, textureSampler, nullptr);     // 销毁纹理采样器
+        vkDestroyImageView(device, textureImageView, nullptr); // 销毁纹理图像视图
 
         vkDestroyImage(device, textureImage, nullptr);
         vkFreeMemory(device, textureImageMemory, nullptr);
@@ -412,6 +416,7 @@ private:
             queueCreateInfos.push_back(queueCreateInfo);
         }
 
+        // 查询是否支持 anisotropy
         VkPhysicalDeviceFeatures deviceFeatures{};
         deviceFeatures.samplerAnisotropy = VK_TRUE;
 
@@ -712,7 +717,7 @@ private:
 
     void createTextureImage() {
         int texWidth, texHeight, texChannels;
-        stbi_uc* pixels = stbi_load("textures/texture.jpg", &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
+        stbi_uc* pixels = stbi_load(CHAPTER_NAME "/textures/texture.jpg", &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
         VkDeviceSize imageSize = texWidth * texHeight * 4;
 
         if (!pixels) {
@@ -741,31 +746,37 @@ private:
     }
 
     void createTextureImageView() {
-        textureImageView = createImageView(textureImage, VK_FORMAT_R8G8B8A8_SRGB);
+        textureImageView = createImageView(textureImage, VK_FORMAT_R8G8B8A8_SRGB); // 跟之前的 createImageView() 没什么差别，唯一要改的就是 image 本身和 format
     }
 
     void createTextureSampler() {
         VkPhysicalDeviceProperties properties{};
-        vkGetPhysicalDeviceProperties(physicalDevice, &properties);
+        vkGetPhysicalDeviceProperties(physicalDevice, &properties); // 查询物理设备特性，例如基本设备属性，例如名称、类型和支持的 Vulkan 版本
+                                                                    // 这居然是代码里第一次正式使用，我们之前用的是类似的函数 vkGetPhysicalDeviceQueueFamilyProperties
 
         VkSamplerCreateInfo samplerInfo{};
         samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-        samplerInfo.magFilter = VK_FILTER_LINEAR;
+        samplerInfo.magFilter = VK_FILTER_LINEAR; // 如何插值放大或缩小的纹素，放大涉及过采样，缩小涉及欠采样
         samplerInfo.minFilter = VK_FILTER_LINEAR;
-        samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-        samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-        samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-        samplerInfo.anisotropyEnable = VK_TRUE;
-        samplerInfo.maxAnisotropy = properties.limits.maxSamplerAnisotropy;
-        samplerInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
-        samplerInfo.unnormalizedCoordinates = VK_FALSE;
-        samplerInfo.compareEnable = VK_FALSE;
+        samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT; // 按轴（称为 uvw 而不是 xyz）指定寻址模式，有：
+        samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT; // 1. VK_SAMPLER_ADDRESS_MODE_REPEAT 重复纹理，2. _MIRRORED_REPEAT 镜像重复纹理，3. _CLAMP_TO_EDGE 使用纹理边缘颜色
+        samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT; // 4. _MIRROR_CLAMP_TO_EDGE 使用镜像纹理边缘颜色，5. _CLAMP_TO_BORDER 返回待会儿设置的 border color（注意跟 edge 区分）
+        samplerInfo.anisotropyEnable = VK_TRUE; // 启用各向异性过滤，性能支持情况下没理由不使用（但得设备支持，虽然现代显卡不太可能不支持）
+        samplerInfo.maxAnisotropy = properties.limits.maxSamplerAnisotropy; // 限制可用于计算最终颜色的纹素样本数量，设为硬件支持的最大值
+        samplerInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK; // border color，在 VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER 下启用，在不使用扩展的情况下只能从枚举的几种里选而不能自定义
+        samplerInfo.unnormalizedCoordinates = VK_FALSE; // 如果为 true，则可以使用 [0, texWidth) 和 [0, texHeight) 范围内的坐标；如果为 false，则是 [0, 1)，超出了就按照 address mode 处理
+                                                        // 实际应用程序几乎总是使用归一化坐标，因为这样就可以对不同分辨率的纹理使用完全相同的坐标
+        samplerInfo.compareEnable = VK_FALSE; // 若启用比较函数，则纹素将首先与一个值进行比较，并且该比较的结果用于过滤操作，主要用于阴影贴图的 Percentage-Closer Filtering 操作（经典的 PCF）
         samplerInfo.compareOp = VK_COMPARE_OP_ALWAYS;
-        samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+        samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR; // mipmap 相关设置，之后再讲
+        // samplerInfo.mipLodBias = 0.0f; // Optional
+        // samplerInfo.minLod = 0.0f;     // Optional
+        // samplerInfo.maxLod = 0.0f;     // Optional
 
         if (vkCreateSampler(device, &samplerInfo, nullptr, &textureSampler) != VK_SUCCESS) {
             throw std::runtime_error("failed to create texture sampler!");
         }
+        // 可以看到，采样器没有引用 VkImage，它是一个独立的对象，提供从纹理提取颜色的接口，可以应用于任何图像，无论 1D / 2D / 3D（很多旧的 API 会把图像和过滤组合到一个状态中）
     }
 
     VkImageView createImageView(VkImage image, VkFormat format) {
@@ -1336,7 +1347,7 @@ private:
         VkPhysicalDeviceFeatures supportedFeatures;
         vkGetPhysicalDeviceFeatures(device, &supportedFeatures);
 
-        return indices.isComplete() && extensionsSupported && swapChainAdequate && supportedFeatures.samplerAnisotropy;
+        return indices.isComplete() && extensionsSupported && swapChainAdequate && supportedFeatures.samplerAnisotropy; // 多查询一个特性（个人感觉这里有点草率，Anisotropy 应该是一个可以缺省的特性）
     }
 
     bool checkDeviceExtensionSupport(VkPhysicalDevice device) {

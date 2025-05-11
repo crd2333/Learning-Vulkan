@@ -433,24 +433,43 @@ private:
         subpass.pColorAttachments = &colorAttachmentRef;
 
         // 这里比之前 11_render_passes 多了 dependency 相关设置
+        // dependency 这一块着实比较复杂，不想啃文档的话，可以参考这两篇文章
+        // [一张图形象理解 Vulkan Sub Pass](https://zhuanlan.zhihu.com/p/461097833)
+        // [关于 Vulkan Tutorial 中同步问题的解释](https://zhuanlan.zhihu.com/p/350483554)
 
-        // RenderPass 的 SubPass 会自动进行图像布局转换，由 SubPass 的依赖锁决定，依赖包括 SubPass 之间内存和执行的依赖关系
+        // RenderPass 的 SubPass 会自动进行图像布局转换，由 SubPass 的依赖所决定，依赖包括 SubPass 之间内存和执行的依赖关系
         // 虽然我们只有一个 SubPass，但其执行之前和之后的操作也被算作隐含的 SubPass
         // 在 RenderPass 开始和结束时会自动进行图像布局变换，但开始时的时机与我们的需求不符，因为管线开始时可能还没有获取到交换链图像
-        // 有两种方式可以解决这个问题，这里采用第二种方式来更好地理解 SubPass 依赖如何控制图像布局变换
-        // 一个是设置 imageAvailableSemaphore 信号量的 waitStages 为 VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT，确保 RenderPass 在获取交换链图像之前不会开始
-        // 另一个是设置 RenderPass 等待 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT 管线阶段
+        // 补充：
+        // 这里是说，我们对 Render Pass 的设置为开始时不关心布局 VK_IMAGE_LAYOUT_UNDEFINED，结束时要转换为 VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
+        // 而实际上，我们唯一的 Sub Pass 引用这个 colorAttachment，要求的 layout 是 _COLOR_ATTACHMENT_OPTIMAL，跟 _UNDEFINED 不一致（实际上是保持着从 presentation engine 拿到的原状 _PRESENT_SRC_KHR）
+        // 于是这里就发生了 implicit layout transition（如果我们没有显式指定 denpendency 的话），默认的隐式转换在这里可能引起问题（其 srcStageMask 为 VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT），这就是为什么我们要自己显式指定
+
+        // 有两种方式可以解决这个问题
+        // 1. 是设置 imageAvailableSemaphore 信号量的 waitStages 为 VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT，确保 RenderPass 在获取交换链图像之前不会开始
+        //    这可以想象浪费了部分资源，因为 Command Buffer 里不涉及 colorAttachment 的操作（我们 fragment shader 之前的所有操作）明显可以先做，直到真正用到它的阶段再阻塞住，这样可以提高管线的吞吐量
+        // 2. 设置 RenderPass 等待 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT 管线阶段
+        // 这里采用第二种方式来更好地理解 SubPass 依赖如何控制图像布局变换
 
         VkSubpassDependency dependency{};
         dependency.srcSubpass = VK_SUBPASS_EXTERNAL; // 依赖之前的 SubPass 的索引，指定为 RenderPass 之前或之后的隐含的 SubPass
         dependency.dstSubpass = 0;                   // 依赖之后的 SubPass 的索引，指定为我们唯一创建的 subpass
         // 为了避免出现循环依赖，给 dstSubpass 设置的值必须始终大于 srcSubpass（除非其中一个子通道是 VK_SUBPASS_EXTERNAL）
 
-        // 指定要等待的操作以及这些操作发生的阶段，这样设置后，图像布局变换直到必要时（当我们开始写入颜色数据时）才会进行
-        dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; // 等待交换链完成从图像读取，然后才能访问它
-        dependency.srcAccessMask = 0;
-        dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; // 应等待此操作的操作位于颜色附件阶段，并涉及颜色附件的写入
-        dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        // 我们把整个 dependency 的机制抽象为以下步骤：
+        // vkBeginCommandBuffer();
+        // CmdA();
+        // CmdSync(); // 也就是这里的 dependency
+        // CmdB();
+        // vkEndCommandBuffer();
+        // 简单理解起见（不完全严谨）：
+        // CmdA 若满足 CmdSync 同步命令的 srcStage / srcAccess 条件，它就会受到 CmdSync 的影响，作为被等待者；CmdB 若满足 CmdSync 同步命令的 dstStage/dstAccess 条件，它就会受到 CmdSync 的影响，作为等待者
+
+        // 指定要等待的操作以及这些操作发生的阶段，这样设置后，图像布局变换将不会发生，直到必要且允许时（即当我们想要开始写入颜色数据时，这时交换链图像肯定已经获取到）才会进行
+        dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; // 通过等待颜色附件输出阶段来等待交换链完成从图像读取这一外部操作（也就不会在这之前进行图像布局转换），然后才能开始 dst stage 的操作访问它
+        dependency.srcAccessMask = 0;                                            // 这代表不关心该阶段里的内存读写操作，只要 srcStage 执行完，dstStage 阻塞的操作就可以继续了（换句话说，没有 memory dependency）
+        dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; // 应等待 srcStage 操作的操作（这里也就是我们的 index 0 SubPss，涉及 loadOp 和图像布局转换）位于颜色附件阶段
+        dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT /* | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT */; // 该操作涉及颜色附件的写入（loadOp 包含写入），个人认为还应该有个 _READ_BIT
 
         VkRenderPassCreateInfo renderPassInfo{};
         renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
@@ -748,7 +767,7 @@ private:
 
         // 指定要等待哪些信号量以及在哪些阶段等待
         VkSemaphore waitSemaphores[] = {imageAvailableSemaphore}; // 要等待的信号量，跟 waitStages 索引一一对应
-        VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT}; // 在图像可用之前等待向图像写入颜色
+        VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT}; // 在图像可用之前阻塞在向图像写入颜色阶段（输出到颜色附件）
         submitInfo.waitSemaphoreCount = 1;
         submitInfo.pWaitSemaphores = waitSemaphores;
         submitInfo.pWaitDstStageMask = waitStages;

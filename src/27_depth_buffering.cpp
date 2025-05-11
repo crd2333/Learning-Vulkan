@@ -2,7 +2,7 @@
 #include <GLFW/glfw3.h>
 
 #define GLM_FORCE_RADIANS
-#define GLM_FORCE_DEPTH_ZERO_TO_ONE
+#define GLM_FORCE_DEPTH_ZERO_TO_ONE // GLM 生成的透视投影矩阵默认将使用 OpenGL 的 -1.0 到 1.0 深度范围，配置以使用 Vulkan 的 0.0 到 1.0 范围
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -74,7 +74,7 @@ struct SwapChainSupportDetails {
 };
 
 struct Vertex {
-    glm::vec3 pos;
+    glm::vec3 pos; // 把之前的 vec2 改成 vec3
     glm::vec3 color;
     glm::vec2 texCoord;
 
@@ -92,7 +92,7 @@ struct Vertex {
 
         attributeDescriptions[0].binding = 0;
         attributeDescriptions[0].location = 0;
-        attributeDescriptions[0].format = VK_FORMAT_R32G32B32_SFLOAT;
+        attributeDescriptions[0].format = VK_FORMAT_R32G32B32_SFLOAT; // RGB 各 32 位
         attributeDescriptions[0].offset = offsetof(Vertex, pos);
 
         attributeDescriptions[1].binding = 0;
@@ -121,7 +121,7 @@ const std::vector<Vertex> vertices = {
     {{0.5f, 0.5f, 0.0f}, {0.0f, 0.0f, 1.0f}, {0.0f, 1.0f}},
     {{-0.5f, 0.5f, 0.0f}, {1.0f, 1.0f, 1.0f}, {1.0f, 1.0f}},
 
-    {{-0.5f, -0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}},
+    {{-0.5f, -0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}}, // z 值 -0.5f
     {{0.5f, -0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}},
     {{0.5f, 0.5f, -0.5f}, {0.0f, 0.0f, 1.0f}, {0.0f, 1.0f}},
     {{-0.5f, 0.5f, -0.5f}, {1.0f, 1.0f, 1.0f}, {1.0f, 1.0f}}
@@ -168,6 +168,7 @@ private:
 
     VkCommandPool commandPool;
 
+    // 深度附件基于图像（跟颜色附件一样），但交换链不会为我们自动创建。深度图像再次需要三要素：图像、内存和图像视图
     VkImage depthImage;
     VkDeviceMemory depthImageMemory;
     VkImageView depthImageView;
@@ -249,6 +250,7 @@ private:
     }
 
     void cleanupSwapChain() {
+        // 深度缓冲的清理应在 SwapChain 中进行
         vkDestroyImageView(device, depthImageView, nullptr);
         vkDestroyImage(device, depthImage, nullptr);
         vkFreeMemory(device, depthImageMemory, nullptr);
@@ -328,7 +330,7 @@ private:
 
         createSwapChain();
         createImageViews();
-        createDepthResources();
+        createDepthResources(); // 扩展 recreateSwapChain 函数来重建深度缓冲（更改其分辨率）
         createFramebuffers();
     }
 
@@ -534,14 +536,15 @@ private:
         colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 
+        // 深度附件
         VkAttachmentDescription depthAttachment{};
-        depthAttachment.format = findDepthFormat();
+        depthAttachment.format = findDepthFormat(); // format 应该与深度图像本身相同
         depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-        depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;       // 加载时清除
+        depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE; // 不关心存储深度数据，允许硬件执行额外优化（_STORE 渲染的内容将存储在内存中以便之后读取，_DONT_CARE 渲染后不会读取帧缓冲的内容）
         depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; // 不关心之前的内容
         depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
         VkAttachmentReference colorAttachmentRef{};
@@ -556,16 +559,56 @@ private:
         subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
         subpass.colorAttachmentCount = 1;
         subpass.pColorAttachments = &colorAttachmentRef;
-        subpass.pDepthStencilAttachment = &depthAttachmentRef;
+        // 没有 depthAttachmentCount 这种成员，因为只能使用单个深度（+模板）附件，对多个缓冲进行深度测试没有任何意义
+        subpass.pDepthStencilAttachment = &depthAttachmentRef; // 为唯一的 SubPass 增加对附件的引用
 
+        // RenderPass 的 SubPass 会自动进行图像布局转换，由 SubPass 的依赖所决定，依赖包括 SubPass 之间内存和执行的依赖关系
+        // 虽然我们只有一个 SubPass，但其执行之前和之后的操作也被算作隐含的 SubPass
+        // 在 RenderPass 开始和结束时会自动进行图像布局变换，但开始时的时机与我们的需求不符，因为管线开始时可能还没有获取到交换链图像
         VkSubpassDependency dependency{};
         dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
         dependency.dstSubpass = 0;
+        // 指定要等待的操作以及这些操作发生的阶段，使图像布局变换直到必要时（开始写入颜色数据时）才会进行，也确保 “深度附件的布局转换” 与 “其在加载操作时被部分清除（因为 initialLayout undefined）” 之间没有冲突
+        // 这里把之前的设置列了出来，以供对比有什么变化
+
+        // dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; // 通过等待颜色附件输出阶段来等待交换链完成从图像读取这一外部操作（也就不会在这之前进行图像布局转换），然后才能开始 dst stage 的操作访问它
+        // dependency.srcAccessMask = 0;                                            // 这代表不关心该阶段里的内存读写操作，只要 srcStage 执行完，dstStage 阻塞的操作就可以继续了（换句话说，没有 memory dependency）
         dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
         dependency.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-        dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-        dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        // 这里我的理解是，没有类似于 VK_PIPELINE_STAGE_DEPTH_STENCIL_ATTACHMENT_OUTPUT_BIT 这种枚举值，所以我们用 VK_PIPELINE_STAGE_<EARLY / LATE>_FRAGMENT_TESTS_BIT 这种枚举值
+        // 而且 depth_stencil 跟 color 这种要提交到交换链上的附件不一样，它只在 RenderPass 里使用，对 in-flight 的两帧共用，我们只需要确保上一个 RenderPass 的 fragment test 完成即可
+        // depth test 分为 early 和 late（对 fragment shader 而言），对图形渲染管线稍有了解的应该都知道，这里不赘述
+        // 以及这里 tutorial 源代码跟网页教程有出入（srcStageMask 为 _EARLY_FRAGMENT_TESTS_BIT；srcAccessMask 没写，缺省值为 0），个人认为源代码的写法更科学（显然应该等 late 更好吧？而且 test 涉及通过测试写入新值，需要指定写入）
 
+        // dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; // 应等待 srcStage 操作的操作（这里也就是我们的 index 0 SubPss，涉及 loadOp 和图像布局转换）位于颜色附件阶段
+        // dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;         // 并涉及颜色附件的写入（loadOp 包含写入）
+        dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT; // 深度附件最早在早期片段测试管线阶段被访问
+        dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT /* | K_ACCESS_COLOR_ATTACHMENT_READ_BIT */ | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT /* | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT */; // 并涉及深度附件的写入（loadOp 包含写入），个人认为还应该有两个 _READ_BIT
+
+        // 可以再对比一下 Vulkan Examples 的写法，可以看到，它是把 color 和 depth_stencil 的依赖分开来写成两个依赖，本质上应该差不多，但看着更清楚
+        // std::array<VkSubpassDependency, 2> dependencies{};
+        // // Depth attachment
+        // dependencies[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+        // dependencies[0].dstSubpass = 0;
+        // dependencies[0].srcStageMask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;  // 虽然 LATE 在 EARLY 之后，应该已经包括了 EARLY，但都指定的写法更清晰
+        // dependencies[0].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        // dependencies[0].dstStageMask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+        // dependencies[0].dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT; // 感觉这里比 tutorial 更科学
+        // dependencies[0].dependencyFlags = 0; // Optional
+        // // Color attachment
+        // dependencies[1].srcSubpass = VK_SUBPASS_EXTERNAL;
+        // dependencies[1].dstSubpass = 0;
+        // dependencies[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        // dependencies[1].srcAccessMask = 0;
+        // dependencies[1].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        // dependencies[1].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT; // 感觉这里比 tutorial 更科学
+        // dependencies[1].dependencyFlags = 0; // Optional
+        // VkRenderPassCreateInfo renderPassCI{};
+        // ...
+        // renderPassCI.dependencyCount = static_cast<uint32_t>(dependencies.size()); // Number of subpass dependencies
+        // renderPassCI.pDependencies = dependencies.data();                          // Subpass dependencies used by the render pass
+
+        // 更新 RenderPass，使用唯一的 SubPass，引用两个 attachment
         std::array<VkAttachmentDescription, 2> attachments = {colorAttachment, depthAttachment};
         VkRenderPassCreateInfo renderPassInfo{};
         renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
@@ -664,13 +707,18 @@ private:
         multisampling.sampleShadingEnable = VK_FALSE;
         multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
 
+        // 在图形管线中启用深度测试
         VkPipelineDepthStencilStateCreateInfo depthStencil{};
         depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-        depthStencil.depthTestEnable = VK_TRUE;
-        depthStencil.depthWriteEnable = VK_TRUE;
-        depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
-        depthStencil.depthBoundsTestEnable = VK_FALSE;
-        depthStencil.stencilTestEnable = VK_FALSE;
+        depthStencil.depthTestEnable = VK_TRUE;           // 启用深度测试，用 depthCompareOp 来测试
+        depthStencil.depthWriteEnable = VK_TRUE;          // 允许通过的片段更新深度缓冲区
+        depthStencil.depthCompareOp = VK_COMPARE_OP_LESS; // 用于保留或丢弃片段的比较（小于或等于的片段将通过）
+        depthStencil.depthBoundsTestEnable = VK_FALSE;    // 深度范围测试，仅保留落在指定深度范围内的片段，本教程不启用
+        // depthStencil.minDepthBounds = 0.0f;            // Optional
+        // depthStencil.maxDepthBounds = 1.0f;            // Optional
+        depthStencil.stencilTestEnable = VK_FALSE;        // 先不启用模板测试
+        // depthStencil.front = {};                       // Optional
+        // depthStencil.back = {};                        // Optional
 
         VkPipelineColorBlendAttachmentState colorBlendAttachment{};
         colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
@@ -714,7 +762,7 @@ private:
         pipelineInfo.pViewportState = &viewportState;
         pipelineInfo.pRasterizationState = &rasterizer;
         pipelineInfo.pMultisampleState = &multisampling;
-        pipelineInfo.pDepthStencilState = &depthStencil;
+        pipelineInfo.pDepthStencilState = &depthStencil; // 添加深度测试，之前没有这玩意儿，默认缺省为 nullptr
         pipelineInfo.pColorBlendState = &colorBlending;
         pipelineInfo.pDynamicState = &dynamicState;
         pipelineInfo.layout = pipelineLayout;
@@ -730,13 +778,17 @@ private:
         vkDestroyShaderModule(device, vertShaderModule, nullptr);
     }
 
+    // 修改帧缓冲创建，以将深度图像绑定到深度附件
     void createFramebuffers() {
         swapChainFramebuffers.resize(swapChainImageViews.size());
 
+        // 颜色附件对于每个交换链图像都不同，但相同的深度图像可以被所有交换链图像使用，因为由于我们的信号量，一次只运行一个 SubPass
+        // 我的理解是，颜色附件作为 in-flight 时呈现渲染结果的东西，它需要有个中间媒介存储，因此每一帧都要有一个；但是深度附件可以由所有交换链图像使用，因为它只在渲染时使用
+        // semaphore 的设置使得同一时刻只会有一个渲染 pass 在工作，但存在多个交换链图像等待呈现到屏幕上
         for (size_t i = 0; i < swapChainImageViews.size(); i++) {
             std::array<VkImageView, 2> attachments = {
                 swapChainImageViews[i],
-                depthImageView
+                depthImageView // 多一个附件
             };
 
             VkFramebufferCreateInfo framebufferInfo{};
@@ -767,13 +819,20 @@ private:
         }
     }
 
+    // 创建 Z-Buffer 相关资源
     void createDepthResources() {
-        VkFormat depthFormat = findDepthFormat();
+        VkFormat depthFormat = findDepthFormat(); // 与纹理图像不同，我们不一定需要特定的格式，因为我们不会直接从程序访问纹素，它只需要具有合理的精度
 
-        createImage(swapChainExtent.width, swapChainExtent.height, depthFormat, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, depthImage, depthImageMemory);
-        depthImageView = createImageView(depthImage, depthFormat, VK_IMAGE_ASPECT_DEPTH_BIT);
+        // 并且深度图应该具有与颜色附件相同的分辨率（由交换链 extent 定义），适用于深度附件的图像用途，最佳平铺 (tiling) 和设备本地内存
+        createImage(swapChainExtent.width, swapChainExtent.height, depthFormat, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, depthImage, depthImageMemory);
+        depthImageView = createImageView(depthImage, depthFormat, VK_IMAGE_ASPECT_DEPTH_BIT); // 创建深度图的 view
+        // 创建深度图像就到此为止，我们不需要映射它或将另一个图像复制到它（像纹理图像或 vertex / index buffer 那样），因为我们将在渲染 Pass 开始时像颜色附件一样清除它
+        // 我们不需要显式地将图像的布局转换为深度附件，因为我们将会修改 RenderPass 以包含深度附件，而 RenderPass 的 SubPass 会自动进行图像布局转换，由 SubPass 的依赖所决定 (VkSubpassDependency)
+        // vulkan tutorial 中为了教程的完整性起见，依然描述了该过程，这里就直接跳过了
     }
 
+    // 接受从最理想到最不理想的候选格式列表，并检查哪个是第一个受支持的。格式的支持取决于平铺模式和用途，因此也要包含在参数内
     VkFormat findSupportedFormat(const std::vector<VkFormat>& candidates, VkImageTiling tiling, VkFormatFeatureFlags features) {
         for (VkFormat format : candidates) {
             VkFormatProperties props;
@@ -786,24 +845,25 @@ private:
             }
         }
 
-        throw std::runtime_error("failed to find supported format!");
+        throw std::runtime_error("failed to find supported format!"); // 所有候选格式都不支持所需的用途，就抛出异常
     }
 
     VkFormat findDepthFormat() {
         return findSupportedFormat(
         {VK_FORMAT_D32_SFLOAT, VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_D24_UNORM_S8_UINT},
             VK_IMAGE_TILING_OPTIMAL,
-            VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT
+            VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT // 使用 VK_FORMAT_FEATURE_ 标志而不是 VK_IMAGE_USAGE_
         );
     }
 
+    // 所选深度格式是否包含模板分量，暂时用不到
     bool hasStencilComponent(VkFormat format) {
         return format == VK_FORMAT_D32_SFLOAT_S8_UINT || format == VK_FORMAT_D24_UNORM_S8_UINT;
     }
 
     void createTextureImage() {
         int texWidth, texHeight, texChannels;
-        stbi_uc* pixels = stbi_load("textures/texture.jpg", &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
+        stbi_uc* pixels = stbi_load(CHAPTER_NAME "/textures/texture.jpg", &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
         VkDeviceSize imageSize = texWidth * texHeight * 4;
 
         if (!pixels) {
@@ -859,6 +919,7 @@ private:
         }
     }
 
+    // 跟之前比稍微改了一下，把 aspectMask 参数化（之前用的都是 VK_IMAGE_ASPECT_COLOR_BIT）
     VkImageView createImageView(VkImage image, VkFormat format, VkImageAspectFlags aspectFlags) {
         VkImageViewCreateInfo viewInfo{};
         viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -1215,7 +1276,7 @@ private:
 
         std::array<VkClearValue, 2> clearValues{};
         clearValues[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
-        clearValues[1].depthStencil = {1.0f, 0};
+        clearValues[1].depthStencil = {1.0f, 0}; // depth 清理为 1.0f
 
         renderPassInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());
         renderPassInfo.pClearValues = clearValues.data();

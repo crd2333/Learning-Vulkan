@@ -22,6 +22,8 @@
 #include <optional>
 #include <set>
 
+// 我们在 UBO 部分初识 descriptor，本章将介绍一种新的 descriptor 类型 —— combined image sampler，使着色器可以通过采样器对象访问图像资源
+
 const uint32_t WIDTH = 800;
 const uint32_t HEIGHT = 600;
 
@@ -75,7 +77,7 @@ struct SwapChainSupportDetails {
 struct Vertex {
     glm::vec2 pos;
     glm::vec3 color;
-    glm::vec2 texCoord;
+    glm::vec2 texCoord; // 添加纹理坐标
 
     static VkVertexInputBindingDescription getBindingDescription() {
         VkVertexInputBindingDescription bindingDescription{};
@@ -99,6 +101,7 @@ struct Vertex {
         attributeDescriptions[1].format = VK_FORMAT_R32G32B32_SFLOAT;
         attributeDescriptions[1].offset = offsetof(Vertex, color);
 
+        // 修改 Vertex 结构以包含纹理坐标的 vec2
         attributeDescriptions[2].binding = 0;
         attributeDescriptions[2].location = 2;
         attributeDescriptions[2].format = VK_FORMAT_R32G32_SFLOAT;
@@ -114,7 +117,7 @@ struct UniformBufferObject {
     alignas(16) glm::mat4 proj;
 };
 
-const std::vector<Vertex> vertices = {
+const std::vector<Vertex> vertices = { // 加上纹理坐标数据
     {{-0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}},
     {{0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}},
     {{0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}, {0.0f, 1.0f}},
@@ -556,12 +559,13 @@ private:
         uboLayoutBinding.pImmutableSamplers = nullptr;
         uboLayoutBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
 
+        // 修改 descriptor set layout，多一个 binding
         VkDescriptorSetLayoutBinding samplerLayoutBinding{};
         samplerLayoutBinding.binding = 1;
         samplerLayoutBinding.descriptorCount = 1;
         samplerLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         samplerLayoutBinding.pImmutableSamplers = nullptr;
-        samplerLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        samplerLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; // 指示只在 fragment shader 中使用（也可以在 vertex shader 中使用，例如从 height field 动态创建 terrian）
 
         std::array<VkDescriptorSetLayoutBinding, 2> bindings = {uboLayoutBinding, samplerLayoutBinding};
         VkDescriptorSetLayoutCreateInfo layoutInfo{};
@@ -726,7 +730,7 @@ private:
 
     void createTextureImage() {
         int texWidth, texHeight, texChannels;
-        stbi_uc* pixels = stbi_load("textures/texture.jpg", &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
+        stbi_uc* pixels = stbi_load(CHAPTER_NAME "/textures/texture.jpg", &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
         VkDeviceSize imageSize = texWidth * texHeight * 4;
 
         if (!pixels) {
@@ -962,6 +966,7 @@ private:
     }
 
     void createDescriptorPool() {
+        // 创建一个更大的 descriptor pool，更改 poolSize
         std::array<VkDescriptorPoolSize, 2> poolSizes{};
         poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         poolSizes[0].descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
@@ -973,6 +978,10 @@ private:
         poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
         poolInfo.pPoolSizes = poolSizes.data();
         poolInfo.maxSets = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
+
+        // 关于描述符池的尺寸
+        // 描述符池不足是典型的验证层不会捕获的问题，从 Vulkan 1.1 开始，如果池不够大，vkAllocateDescriptorSets 可能会因错误代码 VK_ERROR_POOL_OUT_OF_MEMORY 而失败
+        // Vulkan 将分配责任转移到驱动程序，驱动程序可能尝试在内部解决该问题，允许我们对超过描述符池限制的分配不出问题，因此不再严格要求为每种类型的描述符只分配对应的 descriptorCount 的数量，但这仍是最佳实践
 
         if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool) != VK_SUCCESS) {
             throw std::runtime_error("failed to create descriptor pool!");
@@ -992,6 +1001,7 @@ private:
             throw std::runtime_error("failed to allocate descriptor sets!");
         }
 
+        // 分配描述符集后，用一个循环来填充其中的每个描述符
         for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
             VkDescriptorBufferInfo bufferInfo{};
             bufferInfo.buffer = uniformBuffers[i];

@@ -11,7 +11,7 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
 
-#define TINYOBJLOADER_IMPLEMENTATION
+#define TINYOBJLOADER_IMPLEMENTATION // tinyobjloader 这个库跟 stb_image 一样只有单个文件，速度快且易于集成，需要
 #include <tiny_obj_loader.h>
 
 #include <iostream>
@@ -29,11 +29,14 @@
 #include <set>
 #include <unordered_map>
 
+// 本章将加入对模型加载的支持 (obj format)，但将更多地关注将网格数据与程序本身集成，而不是从文件加载它的细节
+// 本章其实很简单，算是个奖励关（
+
 const uint32_t WIDTH = 800;
 const uint32_t HEIGHT = 600;
 
-const std::string MODEL_PATH = "models/viking_room.obj";
-const std::string TEXTURE_PATH = "textures/viking_room.png";
+const std::string MODEL_PATH = CHAPTER_NAME "/models/viking_room.obj";
+const std::string TEXTURE_PATH = CHAPTER_NAME "/textures/viking_room.png";
 
 const int MAX_FRAMES_IN_FLIGHT = 2;
 
@@ -117,13 +120,13 @@ struct Vertex {
         return attributeDescriptions;
     }
 
-    bool operator==(const Vertex& other) const {
+    bool operator==(const Vertex& other) const { // 因为我们使用了 std::unordered_map<Vertex, uint32_t>，所以要为 Vertex 重载 ==operator
         return pos == other.pos && color == other.color && texCoord == other.texCoord;
     }
 };
 
 namespace std {
-    template<> struct hash<Vertex> {
+    template<> struct hash<Vertex> { // 为 Vertex 重载 std::hash
         size_t operator()(Vertex const& vertex) const {
             return ((hash<glm::vec3>()(vertex.pos) ^ (hash<glm::vec3>()(vertex.color) << 1)) >> 1) ^ (hash<glm::vec2>()(vertex.texCoord) << 1);
         }
@@ -181,8 +184,9 @@ private:
     VkImageView textureImageView;
     VkSampler textureSampler;
 
+    // 删除之前的全局 vertices, indices 容器，替换为非 const
     std::vector<Vertex> vertices;
-    std::vector<uint32_t> indices;
+    std::vector<uint32_t> indices; // 索引从 uint16_t 改为 uint32_t，因为顶点数目将远多余 65535
     VkBuffer vertexBuffer;
     VkDeviceMemory vertexBufferMemory;
     VkBuffer indexBuffer;
@@ -236,7 +240,7 @@ private:
         createTextureImage();
         createTextureImageView();
         createTextureSampler();
-        loadModel();
+        loadModel(); // 应在 vertex / index buffer 创建前调用
         createVertexBuffer();
         createIndexBuffer();
         createUniformBuffers();
@@ -571,7 +575,7 @@ private:
         dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
         dependency.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
         dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-        dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT /* | K_ACCESS_COLOR_ATTACHMENT_READ_BIT */ | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT /* | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT */;
 
         std::array<VkAttachmentDescription, 2> attachments = {colorAttachment, depthAttachment};
         VkRenderPassCreateInfo renderPassInfo{};
@@ -810,6 +814,7 @@ private:
 
     void createTextureImage() {
         int texWidth, texHeight, texChannels;
+        // 更新以从 TEXTURE_PATH 加载
         stbi_uc* pixels = stbi_load(TEXTURE_PATH.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
         VkDeviceSize imageSize = texWidth * texHeight * 4;
 
@@ -997,25 +1002,29 @@ private:
         std::vector<tinyobj::material_t> materials;
         std::string warn, err;
 
+        // 通过 tinyobj::LoadObj 函数将模型加载到库的数据结构中
+        // attrib 容器在其 attrib.vertices, attrib.normals, attrib.texcoords 向量中保存所有位置、法线和纹理坐标
+        // OBJ 文件的一个面可以包含任意数量顶点，而我们的应用程序只能渲染三角形。幸运的是，LoadObj 有一个可选参数 triangulate 自动三角化此类面，默认情况下启用
         if (!tinyobj::LoadObj(&attrib, &shapes, &materials, &warn, &err, MODEL_PATH.c_str())) {
             throw std::runtime_error(warn + err);
         }
 
-        std::unordered_map<Vertex, uint32_t> uniqueVertices{};
+        std::unordered_map<Vertex, uint32_t> uniqueVertices{}; // 用唯一的顶点 map 来生成 indices
 
+        // 将文件中的所有面组合成一个模型（组合成我们的定义），迭代所有形状
         for (const auto& shape : shapes) {
             for (const auto& index : shape.mesh.indices) {
                 Vertex vertex{};
 
                 vertex.pos = {
-                    attrib.vertices[3 * index.vertex_index + 0],
+                    attrib.vertices[3 * index.vertex_index + 0], // attrib.vertices 数组是一个 float 值数组，而不是 glm::vec3，需要索引乘三并组合
                     attrib.vertices[3 * index.vertex_index + 1],
                     attrib.vertices[3 * index.vertex_index + 2]
                 };
 
                 vertex.texCoord = {
                     attrib.texcoords[2 * index.texcoord_index + 0],
-                    1.0f - attrib.texcoords[2 * index.texcoord_index + 1]
+                    1.0f - attrib.texcoords[2 * index.texcoord_index + 1] // 反转纹理坐标
                 };
 
                 vertex.color = {1.0f, 1.0f, 1.0f};
@@ -1288,7 +1297,7 @@ private:
             VkDeviceSize offsets[] = {0};
             vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
 
-            vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+            vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT32); // 从 uint16_t 改为 uint32_t
 
             vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descriptorSets[currentFrame], 0, nullptr);
 
