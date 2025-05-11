@@ -199,9 +199,9 @@ FakesAssemblies/
 .vs/
 
 # Don't ignore 3d models in obj format
-!data/models/*.obj
-!data/models/lowpoly/*.obj
-!data/models/voyager/*.obj
+!resources/*.obj
+!resources/lowpoly/*.obj
+!resources/voyager/*.obj
 
 # DLLs in bin
 !bin/*.dll
